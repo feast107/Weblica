@@ -10,12 +10,14 @@ Usage:
 
 import asyncio
 import argparse
+import json
 import sys
 from pathlib import Path
 
 from .cloner import WebCloner
 from .replayer import WebReplayer
 from .auth import AuthManager, AuthConfig
+from .orchestrator import AgentOrchestrator, DecisionContext, ClonePhase, ObstacleType
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -126,6 +128,13 @@ Examples:
         help="Path to JSON file with full auth configuration",
     )
     
+    # Agent mode
+    clone_parser.add_argument(
+        "--agent-mode",
+        action="store_true",
+        help="Enable agent-in-the-loop supervision (DFS, pause at obstacles)",
+    )
+    
     # Replay command
     replay_parser = subparsers.add_parser(
         "replay",
@@ -184,6 +193,91 @@ Examples:
     return parser
 
 
+async def default_agent_callback(ctx: DecisionContext) -> DecisionContext:
+    """
+    Default agent callback for --agent-mode.
+    Prints the decision context and reads a decision from the decision file.
+    """
+    import time
+    decision_file = Path("./weblica-decision.json")
+    
+    print("\n" + "=" * 60)
+    print("AGENT DECISION POINT")
+    print("=" * 60)
+    print(f"URL:        {ctx.snapshot.url}")
+    print(f"Phase:      {ctx.phase.name}")
+    print(f"Obstacle:   {ctx.obstacle.name}")
+    print(f"Title:      {ctx.snapshot.title}")
+    print(f"Status:     {ctx.snapshot.status}")
+    print(f"Depth:      {ctx.snapshot.depth}")
+    if ctx.snapshot.has_login_form:
+        print("[ALERT] Login form detected on page!")
+    if ctx.snapshot.has_captcha:
+        print("[ALERT] CAPTCHA detected on page!")
+    if ctx.snapshot.error_indicators:
+        print(f"[ALERT] Error indicators: {ctx.snapshot.error_indicators}")
+    if ctx.notes:
+        print(f"Notes:      {ctx.notes}")
+    if ctx.discovered_assets:
+        print(f"Assets:     {ctx.discovered_assets}")
+    if ctx.discovered_links:
+        print(f"Links:      {len(ctx.discovered_links)}")
+    print("-" * 60)
+    
+    # If there's no obstacle, auto-continue
+    if ctx.obstacle == ObstacleType.NONE and ctx.phase == ClonePhase.COMPLETED:
+        ctx.recommended_action = "continue"
+        print("Auto-decision: continue (no obstacles)")
+        print("=" * 60 + "\n")
+        return ctx
+    
+    # Write context to decision file for external agent
+    context_file = Path("./weblica-decision-context.json")
+    context_file.write_text(json.dumps({
+        "url": ctx.snapshot.url,
+        "phase": ctx.phase.name,
+        "obstacle": ctx.obstacle.name,
+        "title": ctx.snapshot.title,
+        "has_login_form": ctx.snapshot.has_login_form,
+        "has_captcha": ctx.snapshot.has_captcha,
+        "error_indicators": ctx.snapshot.error_indicators,
+        "notes": ctx.notes,
+        "text_preview": ctx.snapshot.text_preview,
+        "discovered_links": ctx.discovered_links[:10],
+        "discovered_assets": ctx.discovered_assets,
+        "retry_count": ctx.retry_count,
+        "timestamp": time.time(),
+    }, indent=2, ensure_ascii=False), encoding="utf-8")
+    
+    print(f"Decision context written to: {context_file}")
+    print("Waiting for decision file... (Ctrl+C to abort)")
+    
+    # Poll for decision file
+    start = time.time()
+    while True:
+        if decision_file.exists():
+            try:
+                decision = json.loads(decision_file.read_text(encoding="utf-8"))
+                ctx.recommended_action = decision.get("action", "continue")
+                ctx.action_params = decision.get("params", {})
+                ctx.notes = decision.get("notes", ctx.notes)
+                # Clean up
+                decision_file.unlink()
+                print(f"Decision received: {ctx.recommended_action}")
+                print("=" * 60 + "\n")
+                return ctx
+            except Exception as e:
+                print(f"Error reading decision file: {e}")
+        
+        if time.time() - start > 300:
+            print("Timeout waiting for decision (300s). Auto-continuing with 'continue'.")
+            ctx.recommended_action = "continue"
+            print("=" * 60 + "\n")
+            return ctx
+        
+        await asyncio.sleep(1)
+
+
 async def handle_clone(args):
     """Handle clone command."""
     headless = not args.no_headless if args.no_headless else args.headless
@@ -216,6 +310,24 @@ async def handle_clone(args):
     
     auth_manager = AuthManager(auth_config) if auth_config else None
     
+    # Agent mode uses orchestrator
+    if args.agent_mode:
+        async with AgentOrchestrator(
+            start_url=args.url,
+            output_dir=args.output,
+            max_depth=args.depth,
+            headless=headless,
+            proxy=args.proxy,
+            auth_manager=auth_manager,
+            decision_callback=default_agent_callback,
+        ) as orch:
+            async for ctx in orch.run_dfs():
+                # The callback handles everything; this loop just drains the generator
+                pass
+            print(orch.get_summary())
+        return
+    
+    # Standard mode uses batch cloner
     async with WebCloner(
         output_dir=args.output,
         headless=headless,
