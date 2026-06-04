@@ -2,7 +2,7 @@
 
 > **Intelligent Web Application Cloning & Replaying Tool**
 >
-> 基于 CloakBrowser（隐蔽式 Playwright）与智能分析引擎的 Web 应用客户端克隆复现工具。
+> 基于 CloakBrowser（隐蔽式 Playwright）与 Agent-in-the-Loop 智能编排引擎的 Web 应用客户端克隆复现工具。
 
 ---
 
@@ -15,8 +15,8 @@
 pip install -r requirements.txt 2>/dev/null || true
 playwright install chromium 2>/dev/null || true
 
-# 2. 克隆目标站点
-python -m weblica clone <TARGET_URL> -o ./cloned --depth 1
+# 2. 克隆目标站点（推荐 agent-mode）
+python -m weblica clone <TARGET_URL> -o ./cloned --depth 2 --agent-mode
 
 # 3. 启动本地复现服务器
 python -m weblica replay -d ./cloned -p 8080
@@ -30,6 +30,7 @@ python -m weblica compare <TARGET_URL> -d ./cloned -o ./comparison
 - `./cloned/` — 克隆结果（HTML + assets）
 - `./cloned/analysis_1.json` — 页面分析报告（框架、API、资源列表）
 - `./cloned/weblica-manifest.json` — 克隆元数据（页面数、资源数）
+- `./cloned/.weblica-state.json` — 断点续传状态文件
 - `./comparison/` — 对比截图（`original.png`, `clone.png`, `diff.png`）
 
 ---
@@ -38,35 +39,70 @@ python -m weblica compare <TARGET_URL> -d ./cloned -o ./comparison
 
 - **🕵️ 隐蔽克隆 (CloakBrowser)** — 内置多种反检测策略（WebDriver 隐藏、Canvas 指纹混淆、Plugin 伪造、权限伪装），降低被目标站点识别和拦截的概率
 - **🔬 智能分析 (SmartAnalyzer)** — 自动提取页面 DOM 结构、CSS/JS 资源、图片字体、API 端点，并检测前端框架（React、Vue、Angular、Next.js、Nuxt.js 等）
+- **🤖 Agent-in-the-Loop 编排 (AgentOrchestrator)** — 深度优先遍历，每个页面都是决策单元。Agent 在每个障碍点介入分析，用户可在浏览器中手动解决登录/验证码后自动接管继续
+- **🔄 人机协作克隆** — 浏览器窗口在遇到登录页时**保持打开**，用户完成登录后工具自动检测并继续后续深度克隆
 - **📦 深度爬取** — 支持多级页面递归克隆，自动下载并重写静态资源引用为本地路径
 - **🖥️ 本地复现 (WebReplayer)** — 一键启动本地 HTTP 服务器浏览克隆结果，支持热重载
 - **📸 视觉对比** — 对原始站点与克隆结果进行截图对比，量化差异
 - **🎬 交互录制回放** — 录制用户在页面上的点击、输入、滚动等操作，支持在克隆站点上回放验证
-- **🔐 身份认证支持** — Cookie 注入、Bearer Token、Basic Auth、等待人工登录、验证码检测、认证状态持久化
+- **🔐 身份认证支持** — Cookie 注入、Bearer Token、Basic Auth、浏览器持久化人工登录、验证码检测、认证状态持久化
 
 ---
 
 ## 架构概览
 
+### 核心架构
+
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        Weblica                              │
-├─────────────┬─────────────┬─────────────┬───────────────────┤
-│ CloakBrowser│ SmartAnalyzer│ WebCloner   │ WebReplayer       │
-│  (隐蔽浏览器) │  (智能分析器)  │  (克隆引擎)  │  (复现服务器)      │
-├─────────────┼─────────────┼─────────────┼───────────────────┤
-│ • UA 轮换    │ • DOM 结构   │ • 递归爬取   │ • 本地 HTTP 服务   │
-│ • WebDriver  │ • 资源提取   │ • 资产下载   │ • 截图对比        │
-│   抹除       │ • 框架检测   │ • HTML 重写  │ • 交互录制回放     │
-│ • Canvas     │ • API 发现   │ • 索引生成   │                   │
-│   指纹混淆   │ • 表单分析   │             │                   │
-│ • 行为模拟   │             │             │                   │
-└─────────────┴─────────────┴─────────────┴───────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Weblica                                     │
+├─────────────┬─────────────┬───────────────────┬─────────────────────┤
+│ CloakBrowser│ SmartAnalyzer│ AgentOrchestrator │ WebReplayer         │
+│  (隐蔽浏览器) │  (智能分析器)  │  (Agent编排引擎)   │  (复现服务器)        │
+├─────────────┼─────────────┼───────────────────┼─────────────────────┤
+│ • UA 轮换    │ • DOM 结构   │ • DFS 深度优先     │ • 本地 HTTP 服务     │
+│ • WebDriver  │ • 资源提取   │ • 障碍点 Agent 介入 │ • 截图对比          │
+│   抹除       │ • 框架检测   │ • 浏览器持久化      │ • 交互录制回放       │
+│ • Canvas     │ • API 发现   │ • 登录自动检测      │                     │
+│   指纹混淆   │ • 表单分析   │ • 断点续传          │                     │
+│ • 行为模拟   │             │ • 人机协作          │                     │
+└─────────────┴─────────────┴───────────────────┴─────────────────────┘
                             │
                     ┌───────┴───────┐
                     │   Playwright   │
                     │   + aiohttp    │
                     └───────────────┘
+```
+
+### Agent-in-the-Loop 流程
+
+```
+┌─────────────┐     加载页面      ┌─────────────┐
+│   DFS 遍历   │ ───────────────► │  Phase 1    │
+│  (深度优先)  │                  │ 导航+障碍检测 │
+└─────────────┘                  └──────┬──────┘
+       ▲                                │
+       │         检测到障碍              ▼
+       │    ┌───────────────── 浏览器 Page 保持打开
+       │    │                           │
+       │    │                    ┌──────┴──────┐
+       │    │                    │  Agent 决策  │
+       │    │                    │  上下文输出  │
+       │    │                    └──────┬──────┘
+       │    │                           │
+       │    │    ┌──────────────────────┘
+       │    │    │ 用户手动登录 / Agent 决策
+       │    │    ▼
+       │    │ ┌──────────────┐
+       │    └ │ 登录成功检测  │
+       │      │ (轮询检测)   │
+       │      └──────┬───────┘
+       │             │ 登录成功
+       │             ▼
+       │      ┌──────────────┐
+       └──────┤  Phase 2     │
+              │ 分析+下载+保存│
+              └──────────────┘
 ```
 
 ---
@@ -98,6 +134,7 @@ python -m weblica clone <URL> [OPTIONS]
 | `-d, --depth` | `1` | 最大爬取深度 |
 | `--proxy` | 无 | 代理地址，如 `http://127.0.0.1:7890` |
 | `--slow-mo` | 无 | 操作延迟（毫秒），调试用 |
+| `--agent-mode` | `False` | 启用 Agent-in-the-Loop 监督模式 |
 
 **认证选项：**
 
@@ -126,7 +163,8 @@ cloned/
 │   └── fonts/                 # 字体
 ├── analysis_1.json            # 智能分析报告
 ├── weblica-manifest.json      # 克隆清单
-└── weblica-index.html         # 索引浏览页
+├── weblica-index.html         # 索引浏览页
+└── .weblica-state.json        # 断点续传状态
 ```
 
 ### `replay` — 本地复现
@@ -155,37 +193,36 @@ python -m weblica record https://example.com --duration 30 -o session.json
 
 ## Agent 工作流模板
 
-### 模板 A：标准克隆 → 复现 → 对比
+### 模板 A：Agent-in-the-Loop 克隆（推荐）
 
-适用于用户要求"克隆这个网站并看看效果"。
+适用于大多数场景，Agent 在每个页面监督执行。
 
 ```
-Step 1: python -m weblica clone <URL> -o ./cloned --depth 1
-Step 2: 读取 ./cloned/analysis_1.json，汇报检测到的框架和资源数量
-Step 3: python -m weblica compare <URL> -d ./cloned -o ./comparison
-Step 4: 汇报 diff 结果（如有 Pillow）
+Step 1: python -m weblica clone <URL> -o ./cloned --depth 2 --agent-mode
+Step 2: 工具自动执行 DFS 遍历，遇到障碍时生成决策上下文
+Step 3: 读取 ./cloned/analysis_*.json，汇报检测到的框架和资源
+Step 4: python -m weblica compare <URL> -d ./cloned -o ./comparison
 Step 5: python -m weblica replay -d ./cloned -p 8080
 Step 6: 告知用户访问 http://localhost:8080/weblica-index.html
 ```
 
-### 模板 D：认证克隆
+### 模板 D：人机协作克隆（需要登录）
 
-适用于需要登录后才能访问的站点。
+适用于需要登录后才能访问的站点。**浏览器窗口保持打开，用户手动登录后工具自动接管。**
 
 ```
-# 方式 1：使用已有 Cookie
+# Agent-mode + 浏览器持久化（推荐）
+Step 1: python -m weblica clone <URL> -o ./cloned --depth 2 --agent-mode --no-headless
+Step 2: 工具检测到登录页 → 浏览器窗口保持打开
+Step 3: 用户在浏览器窗口中完成登录
+Step 4: 工具轮询检测到登录成功 → 自动继续 DFS 克隆
+Step 5: 全部完成后启动 replay 服务器
+
+# 传统方式：使用已有 Cookie
 Step 1: python -m weblica clone <URL> -o ./cloned --cookies ./cookies.json
 
-# 方式 2：使用 Token
+# 传统方式：使用 Token
 Step 1: python -m weblica clone <URL> -o ./cloned --bearer-token <TOKEN>
-
-# 方式 3：等待人工登录（打开浏览器让用户手动登录）
-Step 1: python -m weblica clone <URL> -o ./cloned --no-headless --wait-login --save-auth
-Step 2: 用户完成登录后，工具自动继续克隆
-Step 3: 认证状态保存到 ./weblica-auth-state.json，后续可直接复用
-
-# 方式 4：复用已保存的认证状态
-Step 1: python -m weblica clone <URL> -o ./cloned --cookies ./weblica-auth-state.json
 ```
 
 ### 模板 B：深度架构分析
@@ -193,7 +230,7 @@ Step 1: python -m weblica clone <URL> -o ./cloned --cookies ./weblica-auth-state
 适用于用户要求"分析这个网站用了什么技术"。
 
 ```
-Step 1: python -m weblica clone <URL> -o ./cloned --depth 2
+Step 1: python -m weblica clone <URL> -o ./cloned --depth 2 --agent-mode
 Step 2: 读取 ./cloned/analysis_1.json
 Step 3: 提取并汇报：
         - frameworks[] → 检测到的前端框架及版本
@@ -222,25 +259,25 @@ Step 5: 对比回放结果，报告交互是否成功
 ```python
 import asyncio
 from weblica import WebCloner, WebReplayer
+from weblica.orchestrator import AgentOrchestrator, DecisionContext
 
-async def workflow():
-    # 克隆
-    async with WebCloner(output_dir="./cloned", max_depth=1) as cloner:
-        await cloner.clone("https://example.com")
-    
-    # 本地服务
-    replayer = WebReplayer(clone_dir="./cloned", port=8080)
-    url = await replayer.start_server()
-    
-    # 视觉对比
-    results = await replayer.compare_visual(
-        original_url="https://example.com",
-        output_dir="./comparison"
-    )
-    
-    await replayer.stop_server()
+async def agent_workflow():
+    # Agent-in-the-Loop 克隆
+    async with AgentOrchestrator(
+        start_url="https://example.com",
+        output_dir="./cloned",
+        max_depth=2,
+    ) as orch:
+        async for ctx in orch.run_dfs():
+            # Agent 在每个决策点介入
+            if ctx.obstacle.name == "LOGIN_REQUIRED":
+                print(f"登录页 detected: {ctx.snapshot.title}")
+                ctx.recommended_action = "manual"  # 等待用户登录
+            else:
+                ctx.recommended_action = "continue"
+        print(orch.get_summary())
 
-asyncio.run(workflow())
+asyncio.run(agent_workflow())
 ```
 
 ---
@@ -249,15 +286,16 @@ asyncio.run(workflow())
 
 ```
 weblica/
-├── __init__.py      # 包入口与导出
-├── __main__.py      # python -m weblica
-├── cli.py           # 命令行接口（argparse）
-├── browser.py       # CloakBrowser 隐蔽浏览器
-├── analyzer.py      # SmartAnalyzer 智能分析器
-├── cloner.py        # WebCloner 克隆引擎
-├── replayer.py      # WebReplayer 复现服务器
-├── auth.py          # AuthManager 认证管理器
-└── utils.py         # 工具函数
+├── __init__.py          # 包入口与导出
+├── __main__.py          # python -m weblica
+├── cli.py               # 命令行接口（argparse）
+├── browser.py           # CloakBrowser 隐蔽浏览器
+├── analyzer.py          # SmartAnalyzer 智能分析器
+├── cloner.py            # WebCloner 克隆引擎
+├── replayer.py          # WebReplayer 复现服务器
+├── auth.py              # AuthManager 认证管理器
+├── orchestrator.py      # AgentOrchestrator Agent编排引擎
+└── utils.py             # 工具函数
 ```
 
 ---
@@ -273,6 +311,20 @@ weblica/
 | Permission 查询覆盖 | 将通知等权限返回为 `prompt` |
 | 语言/时区伪装 | 设置为 `zh-CN` / `Asia/Shanghai` |
 | 鼠标行为模拟 | 随机滚动和鼠标移动 |
+
+---
+
+## HTML 资源重写规则
+
+`_rewrite_html` 支持以下路径形式的自动替换：
+
+| 原始形式 | 示例 |
+|----------|------|
+| 完整 URL | `https://example.com/css/style.css` |
+| 绝对路径（无域名） | `/css/style.css` |
+| 带查询参数 | `/css/style.css?v=1.2.3` |
+| HTML 转义查询 | `/css/style.css?v=1.2.3`（`&` 转 `&amp;`） |
+| 含 `../` 的路径 | `/js/../libs/jquery.js`（自动规范化） |
 
 ---
 
@@ -303,9 +355,11 @@ weblica/
 
 ```json
 {
-  "total_pages": 5,
-  "total_assets": 42,
-  "pages": ["https://example.com", "https://example.com/about"],
+  "total_pages": 21,
+  "total_assets": 35,
+  "pages": ["https://example.com", "https://example.com/user"],
+  "blocked": [],
+  "skipped": [],
   "assets": {
     "https://cdn.example.com/style.css": "assets/css/style_a1b2c3d4.css"
   }
@@ -323,7 +377,7 @@ weblica/
 | `404 on assets` | CDN 跨域资源 | 正常现象，部分资源可能无法下载 |
 | `PIL not available` | Pillow 未安装 | `pip install Pillow` 以生成 diff 图 |
 | `Address already in use` | 端口被占用 | 换用 `-p <其他端口>` |
-| `CAPTCHA detected` | 页面出现验证码 | 使用 `--no-headless --wait-login` 手动处理，或调整 `--captcha-action` |
+| `CAPTCHA detected` | 页面出现验证码 | 使用 `--agent-mode --no-headless` 手动处理 |
 
 ---
 
@@ -332,6 +386,7 @@ weblica/
 1. **合法合规**：仅供学习研究和合法授权的安全测试。遵守目标站点的 `robots.txt` 及相关法律法规。
 2. **动态内容**：SPA（React/Vue/Angular）克隆结果为静态快照，API 数据为克隆时刻的冻结状态。
 3. **反爬对抗**：CloakBrowser 可绕过基础检测，但高级 WAF（Cloudflare Turnstile、Akamai）可能需要额外处理。
+4. **人机协作**：`--agent-mode --no-headless` 模式下浏览器窗口会保持打开，用户可在窗口中完成登录/验证码操作，工具检测到成功后会自动继续。
 
 ---
 

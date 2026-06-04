@@ -242,19 +242,39 @@ class WebCloner:
         """Rewrite HTML to use local asset paths."""
         html = await page.content()
         
-        # Replace asset URLs with local paths
+        # Replace full asset URLs with local paths
         for asset_url, local_path in self.downloaded_assets.items():
             relative_path = str(local_path.relative_to(self.output_dir)).replace("\\", "/")
             html = html.replace(asset_url, relative_path)
         
-        # Also try relative URL variants
+        # Replace relative URL variants (path only, and path with query string)
         for asset_url, local_path in self.downloaded_assets.items():
             relative_path = str(local_path.relative_to(self.output_dir)).replace("\\", "/")
             parsed = urlparse(asset_url)
+            
+            # Variant 1: path only (e.g., /user_assets/css/backend.css)
             relative_variant = parsed.path
             if relative_variant.startswith("/"):
                 html = html.replace(f'"{relative_variant}"', f'"{relative_path}"')
                 html = html.replace(f"'{relative_variant}'", f"'{relative_path}'")
+            
+            # Variant 2: path with query string (e.g., /user_assets/css/backend.css?v=1.3.526)
+            if parsed.query:
+                variant_with_query = f"{parsed.path}?{parsed.query}"
+                html = html.replace(f'"{variant_with_query}"', f'"{relative_path}"')
+                html = html.replace(f"'{variant_with_query}'", f"'{relative_path}'")
+                
+                # Variant 3: query with HTML-escaped ampersand (&amp;)
+                variant_html_escaped = variant_with_query.replace("&", "&amp;")
+                html = html.replace(f'"{variant_html_escaped}"', f'"{relative_path}"')
+                html = html.replace(f"'{variant_html_escaped}'", f"'{relative_path}'")
+            
+            # Variant 4: path with ../ normalization (e.g., /user_assets/js/../libs/...)
+            from os.path import normpath
+            normalized = normpath(relative_variant)
+            if normalized != relative_variant and normalized.startswith("/"):
+                html = html.replace(f'"{normalized}"', f'"{relative_path}"')
+                html = html.replace(f"'{normalized}'", f"'{relative_path}'")
         
         return html
 

@@ -196,10 +196,11 @@ Examples:
 async def default_agent_callback(ctx: DecisionContext) -> DecisionContext:
     """
     Default agent callback for --agent-mode.
-    Prints the decision context and reads a decision from the decision file.
+    
+    With the new orchestrator design, the browser page STAYS OPEN when an
+    obstacle is detected. The user can interact with the real browser window.
     """
     import time
-    decision_file = Path("./weblica-decision.json")
     
     print("\n" + "=" * 60)
     print("AGENT DECISION POINT")
@@ -231,7 +232,7 @@ async def default_agent_callback(ctx: DecisionContext) -> DecisionContext:
         print("=" * 60 + "\n")
         return ctx
     
-    # Write context to decision file for external agent
+    # Write context to file for external monitoring
     context_file = Path("./weblica-decision-context.json")
     context_file.write_text(json.dumps({
         "url": ctx.snapshot.url,
@@ -249,33 +250,53 @@ async def default_agent_callback(ctx: DecisionContext) -> DecisionContext:
         "timestamp": time.time(),
     }, indent=2, ensure_ascii=False), encoding="utf-8")
     
-    print(f"Decision context written to: {context_file}")
-    print("Waiting for decision file... (Ctrl+C to abort)")
-    
-    # Poll for decision file
-    start = time.time()
-    while True:
-        if decision_file.exists():
-            try:
-                decision = json.loads(decision_file.read_text(encoding="utf-8"))
-                ctx.recommended_action = decision.get("action", "continue")
-                ctx.action_params = decision.get("params", {})
-                ctx.notes = decision.get("notes", ctx.notes)
-                # Clean up
-                decision_file.unlink()
-                print(f"Decision received: {ctx.recommended_action}")
+    # Handle specific obstacles
+    if ctx.obstacle == ObstacleType.LOGIN_REQUIRED:
+        print("[DECISION] Login page detected.")
+        print("[DECISION] The browser window is OPEN. You can:")
+        print("  1. Type 'manual' -> I'll wait for you to login in the browser (page stays open)")
+        print("  2. Type 'skip'  -> Skip this page and continue with others")
+        print("  3. Type 'abort' -> Stop the entire clone job")
+        
+        decision_file = Path("./weblica-decision.json")
+        start = time.time()
+        while True:
+            if decision_file.exists():
+                try:
+                    decision = json.loads(decision_file.read_text(encoding="utf-8"))
+                    ctx.recommended_action = decision.get("action", "manual")
+                    ctx.action_params = decision.get("params", {})
+                    ctx.notes = decision.get("notes", ctx.notes)
+                    decision_file.unlink()
+                    print(f"Decision received: {ctx.recommended_action}")
+                    print("=" * 60 + "\n")
+                    return ctx
+                except Exception as e:
+                    print(f"Error reading decision file: {e}")
+            
+            if time.time() - start > 300:
+                print("[DECISION] Timeout (300s). Auto-selecting 'manual' - will wait for browser login.")
+                ctx.recommended_action = "manual"
                 print("=" * 60 + "\n")
                 return ctx
-            except Exception as e:
-                print(f"Error reading decision file: {e}")
-        
-        if time.time() - start > 300:
-            print("Timeout waiting for decision (300s). Auto-continuing with 'continue'.")
-            ctx.recommended_action = "continue"
-            print("=" * 60 + "\n")
-            return ctx
-        
-        await asyncio.sleep(1)
+            
+            await asyncio.sleep(1)
+    
+    elif ctx.obstacle == ObstacleType.CAPTCHA:
+        print("[DECISION] CAPTCHA detected.")
+        print("[DECISION] Options: 'manual' (wait for you to solve), 'skip', 'abort'")
+        ctx.recommended_action = "manual"
+        print("Auto-selecting: manual")
+        print("=" * 60 + "\n")
+        return ctx
+    
+    else:
+        print("[DECISION] Unhandled obstacle.")
+        print("[DECISION] Options: 'skip', 'retry', 'abort'")
+        ctx.recommended_action = "skip"
+        print("Auto-selecting: skip")
+        print("=" * 60 + "\n")
+        return ctx
 
 
 async def handle_clone(args):
