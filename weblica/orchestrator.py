@@ -143,6 +143,7 @@ class AgentOrchestrator:
         auth_manager: Optional[AuthManager] = None,
         decision_callback: Optional[Callable[[DecisionContext], Awaitable[DecisionContext]]] = None,
         state_file: Optional[str] = None,
+        humanize: bool = True,
     ):
         self.start_url = start_url
         self.output_dir = Path(output_dir)
@@ -152,6 +153,7 @@ class AgentOrchestrator:
         self.auth_manager = auth_manager
         self.decision_callback = decision_callback
         self.state_file = state_file or str(self.output_dir / ".weblica-state.json")
+        self.humanize = humanize
         
         self.cloner: Optional[WebCloner] = None
         self.state: Optional[CloneState] = None
@@ -167,6 +169,7 @@ class AgentOrchestrator:
             max_depth=self.max_depth,
             proxy=self.proxy,
             auth_manager=self.auth_manager,
+            humanize=self.humanize,
         )
         await self.cloner.__aenter__()
         return self

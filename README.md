@@ -37,7 +37,7 @@ python -m weblica compare <TARGET_URL> -d ./cloned -o ./comparison
 
 ## 功能特性
 
-- **🕵️ 隐蔽克隆 (CloakBrowser)** — 内置多种反检测策略（WebDriver 隐藏、Canvas 指纹混淆、Plugin 伪造、权限伪装），降低被目标站点识别和拦截的概率
+- **🕵️ 隐蔽克隆 (CloakBrowser)** — 优先使用 CloakHQ 补丁版 Chromium（58 项 C++ 级反检测补丁），自动降级到 Playwright + JS 注入方案。支持人类化行为模拟（鼠标、键盘、滚动）
 - **🔬 智能分析 (SmartAnalyzer)** — 自动提取页面 DOM 结构、CSS/JS 资源、图片字体、API 端点，并检测前端框架（React、Vue、Angular、Next.js、Nuxt.js 等）
 - **🤖 Agent-in-the-Loop 编排 (AgentOrchestrator)** — 深度优先遍历，每个页面都是决策单元。Agent 在每个障碍点介入分析，用户可在浏览器中手动解决登录/验证码后自动接管继续
 - **🔄 人机协作克隆** — 浏览器窗口在遇到登录页时**保持打开**，用户完成登录后工具自动检测并继续后续深度克隆
@@ -60,12 +60,14 @@ python -m weblica compare <TARGET_URL> -d ./cloned -o ./comparison
 │ CloakBrowser│ SmartAnalyzer│ AgentOrchestrator │ WebReplayer         │
 │  (隐蔽浏览器) │  (智能分析器)  │  (Agent编排引擎)   │  (复现服务器)        │
 ├─────────────┼─────────────┼───────────────────┼─────────────────────┤
-│ • UA 轮换    │ • DOM 结构   │ • DFS 深度优先     │ • 本地 HTTP 服务     │
-│ • WebDriver  │ • 资源提取   │ • 障碍点 Agent 介入 │ • 截图对比          │
-│   抹除       │ • 框架检测   │ • 浏览器持久化      │ • 交互录制回放       │
-│ • Canvas     │ • API 发现   │ • 登录自动检测      │                     │
-│   指纹混淆   │ • 表单分析   │ • 断点续传          │                     │
-│ • 行为模拟   │             │ • 人机协作          │                     │
+│ • CloakHQ   │ • DOM 结构   │ • DFS 深度优先     │ • 本地 HTTP 服务     │
+│   补丁内核   │ • 资源提取   │ • 障碍点 Agent 介入 │ • 截图对比          │
+│ • UA 轮换    │ • 框架检测   │ • 浏览器持久化      │ • 交互录制回放       │
+│ • WebDriver  │ • API 发现   │ • 登录自动检测      │                     │
+│   抹除       │ • 表单分析   │ • 断点续传          │                     │
+│ • Canvas     │             │ • 人机协作          │                     │
+│   指纹混淆   │             │                     │                     │
+│ • 人类化行为 │             │                     │                     │
 └─────────────┴─────────────┴───────────────────┴─────────────────────┘
                             │
                     ┌───────┴───────┐
@@ -115,6 +117,10 @@ pip install -r requirements.txt
 
 # 安装 Playwright 浏览器（仅需一次）
 playwright install chromium
+
+# （可选）安装 CloakBrowser 补丁版 Chromium，提升反检测能力
+pip install cloakbrowser
+python -m weblica.browser --download
 ```
 
 ---
@@ -134,6 +140,8 @@ python -m weblica clone <URL> [OPTIONS]
 | `-d, --depth` | `1` | 最大爬取深度 |
 | `--proxy` | 无 | 代理地址，如 `http://127.0.0.1:7890` |
 | `--slow-mo` | 无 | 操作延迟（毫秒），调试用 |
+| `--humanize` | `True` | 人类化行为（鼠标/键盘/滚动），CloakBrowser 模式下生效 |
+| `--no-humanize` | `False` | 禁用人类化行为（更快但隐蔽性降低） |
 | `--agent-mode` | `False` | 启用 Agent-in-the-Loop 监督模式 |
 
 **认证选项：**
@@ -187,6 +195,70 @@ python -m weblica compare https://example.com -d ./cloned -o ./comparison
 
 ```bash
 python -m weblica record https://example.com --duration 30 -o session.json
+```
+
+---
+
+## CloakBrowser 集成
+
+Weblica 优先使用 **CloakBrowser (CloakHQ)** —— 一个基于 Chromium 的补丁版浏览器，包含 58 项 C++ 级反检测补丁（WebDriver 抹除、Canvas/WebGL 指纹混淆、自动化特征消除等）。当补丁版二进制不可用时，自动降级到 Playwright + JS 注入方案。
+
+### 安装 CloakBrowser
+
+**方式一：自动下载（需要外网访问）**
+
+```bash
+pip install cloakbrowser
+python -m weblica.browser --download
+```
+
+**方式二：使用本地已有的二进制（推荐）**
+
+如果已经下载或自行编译了 CloakBrowser 补丁版 Chromium，通过环境变量指定路径即可，无需等待在线下载：
+
+```bash
+# Windows CMD
+set CLOAKBROWSER_BINARY_PATH=D:\Shared\Code\Git\CloakBrowser\bin\cloakbrowser-windows-x64\chrome.exe
+
+# Windows PowerShell
+$env:CLOAKBROWSER_BINARY_PATH="D:\Shared\Code\Git\CloakBrowser\bin\cloakbrowser-windows-x64\chrome.exe"
+
+# Bash (Git Bash / MSYS2)
+export CLOAKBROWSER_BINARY_PATH="D:\Shared\Code\Git\CloakBrowser\bin\cloakbrowser-windows-x64\chrome.exe"
+```
+
+**方式三：手动下载到默认缓存目录**
+
+```bash
+# 查看所需版本和下载地址
+python -m weblica.browser
+
+# 手动下载并解压到 cloakbrowser 默认缓存目录
+curl -L -o cloakbrowser.zip "https://cloakbrowser.dev/chromium-v<VERSION>/cloakbrowser-windows-x64.zip"
+unzip cloakbrowser.zip -d "C:\Users\<USER>\.cloakbrowser\chromium-<VERSION>"
+```
+
+### 验证是否在使用官方二进制
+
+```bash
+export CLOAKBROWSER_BINARY_PATH="D:\Shared\Code\Git\CloakBrowser\bin\cloakbrowser-windows-x64\chrome.exe"
+python -c "from weblica.browser import CloakBrowser; import asyncio; async def t(): b=CloakBrowser(); await b.launch(); print('Real cloak:', b._using_real_cloak); await b.close(); asyncio.run(t())"
+```
+
+输出 `Real cloak: True` 表示正在使用官方补丁版 Chromium。输出 `False` 则表示降级到了 Playwright + JS 注入方案。
+
+> **注意**：`python -c "import cloakbrowser; print(cloakbrowser.binary_info()['installed'])"` 可能返回 `False`，这是预期行为——`binary_info()` 只检查 cloakbrowser 的默认缓存目录，不会检查 `CLOAKBROWSER_BINARY_PATH` 环境变量指向的路径。只要设置了环境变量且文件存在，Weblica 就会正确加载。
+
+### 人类化行为 (`--humanize`)
+
+CloakBrowser 模式下默认启用 `humanize`，会对所有页面交互（点击、输入、滚动）注入人类化延迟和轨迹，大幅降低被反爬虫系统检测的概率。
+
+```bash
+# 默认启用 humanize
+python -m weblica clone https://example.com
+
+# 禁用 humanize（速度更快，但隐蔽性降低）
+python -m weblica clone https://example.com --no-humanize
 ```
 
 ---

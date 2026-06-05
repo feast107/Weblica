@@ -77,6 +77,18 @@ Examples:
         type=int,
         help="Slow down operations by specified milliseconds",
     )
+    clone_parser.add_argument(
+        "--humanize",
+        action="store_true",
+        default=True,
+        help="Enable human-like mouse/keyboard behavior with CloakBrowser (default: True)",
+    )
+    clone_parser.add_argument(
+        "--no-humanize",
+        action="store_true",
+        dest="no_humanize",
+        help="Disable human-like behavior (faster but less stealthy)",
+    )
     
     # Authentication options
     auth_group = clone_parser.add_argument_group("Authentication")
@@ -341,6 +353,7 @@ async def handle_clone(args):
             proxy=args.proxy,
             auth_manager=auth_manager,
             decision_callback=default_agent_callback,
+            humanize=not args.no_humanize,
         ) as orch:
             async for ctx in orch.run_dfs():
                 # The callback handles everything; this loop just drains the generator
@@ -355,6 +368,7 @@ async def handle_clone(args):
         max_depth=args.depth,
         proxy=args.proxy,
         auth_manager=auth_manager,
+        humanize=not args.no_humanize,
     ) as cloner:
         if args.slow_mo:
             cloner.browser.slow_mo = args.slow_mo

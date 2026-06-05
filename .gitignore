@@ -60,6 +60,10 @@ weblica-auth-state.json
 session.json
 *.session.json
 
+# Agent decision files
+weblica-decision-context.json
+weblica-decision.json
+
 # Screenshots & recordings
 *.png
 *.jpg

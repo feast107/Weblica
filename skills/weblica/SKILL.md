@@ -2,7 +2,7 @@
 
 ## Description
 
-Intelligent Web Application Cloning & Replaying Tool powered by CloakBrowser (stealth Playwright) and AgentOrchestrator (Agent-in-the-Loop supervision).
+Intelligent Web Application Cloning & Replaying Tool powered by CloakBrowser (CloakHQ patched Chromium with automatic Playwright fallback) and AgentOrchestrator (Agent-in-the-Loop supervision).
 
 Use this skill when you need to:
 - Clone a web application's frontend for offline analysis or local replay
@@ -36,6 +36,10 @@ Do NOT use this skill for:
 - Python >= 3.9
 - Dependencies in `requirements.txt` installed
 - Playwright browsers installed: `playwright install chromium`
+- (Optional) CloakBrowser patched Chromium for enhanced stealth: `pip install cloakbrowser`
+  - Auto-download: `python -m weblica.browser --download` (requires internet)
+  - Use local binary: `set CLOAKBROWSER_BINARY_PATH=D:\Shared\Code\Git\CloakBrowser\bin\cloakbrowser-windows-x64\chrome.exe`
+  - Verify: `python -c "from weblica.browser import CloakBrowser; import asyncio; async def t(): b=CloakBrowser(); await b.launch(); print('Real cloak:', b._using_real_cloak); await b.close(); asyncio.run(t())"` → should print `True`
 - Working directory must be the project root (`d:\Shared\Code\Git\Weblica`)
 
 ## Installation Check
@@ -67,6 +71,8 @@ python -m weblica clone <URL> [OPTIONS]
 | `-d, --depth` | `1` | Max crawl depth (0 = single page, 2 = deep crawl) |
 | `--proxy` | none | Proxy URL, e.g. `http://127.0.0.1:7890` |
 | `--slow-mo` | none | Slow down by N ms for debugging |
+| `--humanize` | `True` | Human-like mouse/keyboard/scroll behavior (CloakBrowser mode) |
+| `--no-humanize` | `False` | Disable human-like behavior (faster, less stealthy) |
 | `--agent-mode` | `False` | Enable Agent-in-the-Loop supervision (DFS, pause at obstacles) |
 
 **Authentication options for `clone`:**

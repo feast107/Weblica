@@ -36,12 +36,14 @@ class WebCloner:
         max_depth: int = 1,
         proxy: Optional[str] = None,
         auth_manager: Optional[AuthManager] = None,
+        humanize: bool = True,
     ):
         self.output_dir = Path(output_dir)
         self.headless = headless
         self.max_depth = max_depth
         self.proxy = proxy
         self.auth_manager = auth_manager
+        self.humanize = humanize
         
         self.analyzer = SmartAnalyzer()
         self.browser: Optional[CloakBrowser] = None
@@ -56,6 +58,7 @@ class WebCloner:
             headless=self.headless,
             proxy=self.proxy,
             auth_manager=self.auth_manager,
+            humanize=self.humanize,
         )
         await self.browser.launch()
         
