@@ -184,6 +184,7 @@ cloned/
 │       ├── dom.html           # 完整页面 HTML（可直接在浏览器中打开）
 │       ├── screenshot.png     # 完整页面截图
 │       ├── iframe_00.html     # iframe 内容（如有内嵌框架）
+│       ├── iframe_meta.json   # iframe 元数据：src、actual_url、name、捕获方法
 │       ├── assets.json        # CSS、JS、图片、字体
 │       ├── links.json         # 外链与内链
 │       ├── forms.json         # 表单、按钮（向后兼容）
@@ -191,6 +192,7 @@ cloned/
 │       ├── network.json       # 网络流量 + API 调用（含完整 request/response bodies）
 │       └── snapshots.json     # 交互前后的 DOM 快照（滚动、点击等）
 ├── navigation.json            # 站点全局导航树（parent→children、depth 分组）
+├── iframe_route_map.json      # iframe 路由映射：容器页 → iframe src → 匹配的内容页
 ├── weblica-manifest.json      # 克隆清单
 ├── weblica-session.json       # 完整会话记录（操作链 + 流量）
 ├── weblica-index.html         # 索引浏览页
@@ -477,6 +479,7 @@ analysis/
     ├── dom.html           # 完整页面 HTML（可直接在浏览器中打开）
     ├── screenshot.png     # 完整页面截图
     ├── iframe_00.html     # iframe 内容（如有内嵌框架）
+    ├── iframe_meta.json   # iframe 元数据：src、actual_url、name、id、html_length、捕获方法
     ├── assets.json        # CSS、JS、图片、字体资源列表
     ├── links.json         # 页面内所有链接
     ├── forms.json         # 表单和按钮（向后兼容）
@@ -511,6 +514,32 @@ analysis/
   }
 }
 ```
+
+### `iframe_route_map.json`（根目录）
+
+站点全局 iframe 路由映射表，用于逆向基于 iframe 的内容路由架构：
+
+```json
+[
+  {
+    "container_dir": "page_002",
+    "container_url": "https://geo18.doujia5799.top/user/dashboard?ref=addtabs",
+    "container_title": "首页",
+    "iframe_src": "/user/dashboard?addtabs=1",
+    "iframe_absolute_url": "https://geo18.doujia5799.top/user/dashboard?addtabs=1",
+    "matched_content_page": {
+      "url": "https://geo18.doujia5799.top/user/dashboard?ref=addtabs",
+      "dir": "page_017",
+      "title": "首页",
+      "depth": 1
+    }
+  }
+]
+```
+
+- `container_*` — 包含 iframe 的外层页面
+- `iframe_src` / `iframe_absolute_url` — iframe 的 src 属性（相对/绝对）
+- `matched_content_page` — 该 iframe URL 对应已克隆的哪个独立页面（如果存在）
 
 ### `weblica-manifest.json`
 

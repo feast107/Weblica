@@ -111,6 +111,7 @@ python -m weblica clone <URL> [OPTIONS]
 │       ├── dom.html           # Full page HTML (open directly in browser)
 │       ├── screenshot.png     # Full page screenshot
 │       ├── iframe_00.html     # iframe content (when embedded frames exist)
+│       ├── iframe_meta.json   # iframe metadata: src, actual_url, name, capture method
 │       ├── assets.json        # CSS, JS, images, fonts referenced by this page
 │       ├── links.json         # Discovered internal links
 │       ├── forms.json         # Forms and buttons (backward-compatible)
@@ -118,6 +119,7 @@ python -m weblica clone <URL> [OPTIONS]
 │       ├── network.json       # Full network traffic + API calls with COMPLETE request/response bodies
 │       └── snapshots.json     # DOM before/after for interactive operations (click, scroll, etc.)
 ├── navigation.json            # Site-wide page tree: parent→children, depth groups
+├── iframe_route_map.json      # iframe routing map: container page → iframe src → matched content page
 ├── weblica-manifest.json      # Clone metadata
 ├── weblica-session.json       # Complete session recording (all operations + traffic)
 ├── weblica-index.html         # Browsable index page
@@ -505,12 +507,23 @@ Each cloned page gets its own directory with split category files:
 - Each entry: `operation_id`, `action`, `target` (selector), `before.dom_html`, `after.dom_html`
 - Use this to see what content JS dynamically injects into the page
 
+**`iframe_meta.json`** — iframe metadata per page (NEW)
+- Array of iframe descriptors: `index`, `src`, `actual_url`, `name`, `id`, `html_length`, `method` (`frame_evaluate` or `contentDocument_fallback`)
+- Includes error entries for cross-origin frames that could not be accessed
+- Use this to understand which content is loaded inside iframes and whether it matches another cloned page
+
 ### `navigation.json` (root directory) — Site-wide page tree (NEW)
 - `pages` — Flat list of all pages with `page_index`, `url`, `title`, `depth`, `parent_url`
 - `tree.by_parent` — Map of parent URL → list of child URLs
 - `tree.by_depth` — Map of depth level → list of URLs at that level
 - `tree.root` — List of entry-point URLs (no parent)
 - Use this to reconstruct the site's routing hierarchy and navigation flow
+
+### `iframe_route_map.json` (root directory) — iframe routing map (NEW)
+- Array of route entries mapping container pages to their iframe content
+- Each entry: `container_dir`, `container_url`, `container_title`, `iframe_src`, `iframe_absolute_url`, `matched_content_page`
+- `matched_content_page` links to the standalone cloned page that corresponds to the iframe URL (if found)
+- **Critical for iframe-based architectures** (e.g., AdminLTE with tab-iframes): reveals how the outer shell routes to inner content
 
 ### `weblica-manifest.json`
 

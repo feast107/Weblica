@@ -925,7 +925,122 @@ class AgentOrchestrator:
                 json.dumps(snapshots, indent=2, ensure_ascii=False), encoding="utf-8"
             )
         
-        # index.json
+        # ---- P1: Screenshot ----
+        try:
+            await page.screenshot(path=analysis_dir / "screenshot.png", full_page=True)
+        except Exception as e:
+            print(f"    [WARN] Screenshot failed for {url}: {e}")
+        
+        # ---- P3: Enhanced iframe content capture ----
+        iframe_metas = []
+        try:
+            iframe_elements = await page.query_selector_all("iframe")
+            for idx, iframe_el in enumerate(iframe_elements):
+                try:
+                    src = await iframe_el.get_attribute("src") or await iframe_el.get_attribute("data-src") or ""
+                    name = await iframe_el.get_attribute("name") or ""
+                    iframe_id = await iframe_el.get_attribute("id") or ""
+                    
+                    # Wait for frame to appear in page.frames (up to 3s)
+                    frame = None
+                    for _ in range(30):
+                        for f in page.frames:
+                            if f != page.main_frame:
+                                f_url = f.url
+                                f_name = f.name
+                                if (src and (src in f_url or f_url.endswith(src) or src.endswith(f_url))) or (name and f_name == name):
+                                    frame = f
+                                    break
+                        if frame:
+                            break
+                        await asyncio.sleep(0.1)
+                    
+                    if not frame:
+                        # Fallback: try contentDocument from main frame JS
+                        try:
+                            iframe_html = await page.evaluate(f"""() => {{
+                                const el = document.querySelectorAll('iframe')[{idx}];
+                                try {{ return el.contentDocument ? el.contentDocument.documentElement.outerHTML : null; }} catch(e) {{ return null; }}
+                            }}""")
+                        except Exception:
+                            iframe_html = None
+                        
+                        if iframe_html and len(iframe_html) > 100:
+                            meta = {
+                                "index": idx, "src": src, "name": name, "id": iframe_id,
+                                "method": "contentDocument_fallback", "html_length": len(iframe_html),
+                                "filename": f"iframe_{idx:02d}.html"
+                            }
+                            (analysis_dir / meta["filename"]).write_text(iframe_html, encoding="utf-8")
+                            iframe_metas.append(meta)
+                        else:
+                            iframe_metas.append({
+                                "index": idx, "src": src, "name": name, "id": iframe_id,
+                                "method": "contentDocument_fallback", "error": "frame_not_found_or_empty"
+                            })
+                        continue
+                    
+                    # Wait for frame to reach a stable state
+                    try:
+                        await frame.wait_for_load_state("domcontentloaded", timeout=3000)
+                    except Exception:
+                        pass
+                    
+                    # Capture HTML via frame evaluate
+                    iframe_html = await frame.evaluate("() => document.documentElement.outerHTML")
+                    if iframe_html and len(iframe_html) > 100:
+                        meta = {
+                            "index": idx, "src": src, "actual_url": frame.url,
+                            "name": name, "id": iframe_id,
+                            "method": "frame_evaluate", "html_length": len(iframe_html),
+                            "filename": f"iframe_{idx:02d}.html"
+                        }
+                        (analysis_dir / meta["filename"]).write_text(iframe_html, encoding="utf-8")
+                        iframe_metas.append(meta)
+                    else:
+                        iframe_metas.append({
+                            "index": idx, "src": src, "actual_url": frame.url,
+                            "name": name, "id": iframe_id,
+                            "method": "frame_evaluate", "error": "empty_html"
+                        })
+                except Exception as e:
+                    err_msg = str(e)
+                    iframe_metas.append({
+                        "index": idx,
+                        "src": src if 'src' in dir() else "",
+                        "error": err_msg,
+                        "cross_origin": "SecurityError" in err_msg or "Execution context" in err_msg
+                    })
+            
+            captured = len([m for m in iframe_metas if "filename" in m])
+            if captured > 0:
+                print(f"    [OK] Captured {captured} iframe(s) for {url}")
+            if iframe_metas:
+                (analysis_dir / "iframe_meta.json").write_text(
+                    json.dumps(iframe_metas, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
+        except Exception as e:
+            print(f"    [WARN] iframe capture failed for {url}: {e}")
+        
+        # index.json — dynamic file manifest (includes iframe files if present)
+        files_manifest = {
+            "metadata": "metadata.json",
+            "dom": "dom.html",
+            "screenshot": "screenshot.png",
+            "assets": "assets.json",
+            "links": "links.json",
+            "forms": "forms.json",
+            "interactions": "interactions.json",
+            "network": "network.json",
+            "snapshots": "snapshots.json",
+        }
+        for meta in iframe_metas:
+            if "filename" in meta:
+                key = f"iframe_{meta['index']:02d}"
+                files_manifest[key] = meta["filename"]
+        if iframe_metas:
+            files_manifest["iframe_meta"] = "iframe_meta.json"
+        
         index = {
             "page_index": page_idx,
             "url": analysis_data.get("url"),
@@ -941,47 +1056,12 @@ class AgentOrchestrator:
             "links_count": len(analysis_data.get("links", [])),
             "forms_count": len(analysis_data.get("forms", [])),
             "api_calls_count": len(analysis_data.get("api_summary", [])),
-            "files": {
-                "metadata": "metadata.json",
-                "dom": "dom.html",
-                "screenshot": "screenshot.png",
-                "assets": "assets.json",
-                "links": "links.json",
-                "forms": "forms.json",
-                "interactions": "interactions.json",
-                "network": "network.json",
-                "snapshots": "snapshots.json",
-            },
+            "iframe_count": len([m for m in iframe_metas if "filename" in m]),
+            "files": files_manifest,
         }
         (analysis_dir / "index.json").write_text(
             json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8"
         )
-        
-        # ---- P1: Screenshot ----
-        try:
-            await page.screenshot(path=analysis_dir / "screenshot.png", full_page=True)
-        except Exception as e:
-            print(f"    [WARN] Screenshot failed for {url}: {e}")
-        
-        # ---- P3: iframe content capture ----
-        try:
-            frames = page.frames
-            iframe_count = 0
-            for i, frame in enumerate(frames):
-                if frame == page.main_frame:
-                    continue
-                try:
-                    iframe_html = await frame.evaluate("() => document.documentElement.outerHTML")
-                    if iframe_html and len(iframe_html) > 100:
-                        iframe_path = analysis_dir / f"iframe_{iframe_count:02d}.html"
-                        iframe_path.write_text(iframe_html, encoding="utf-8")
-                        iframe_count += 1
-                except Exception:
-                    continue
-            if iframe_count > 0:
-                print(f"    [OK] Captured {iframe_count} iframe(s) for {url}")
-        except Exception as e:
-            print(f"    [WARN] iframe capture failed for {url}: {e}")
     
     async def _auto_interact(self, page: Page, url: str, depth: int):
         """
@@ -1256,6 +1336,79 @@ class AgentOrchestrator:
         nav_path.write_text(json.dumps(nav, indent=2, ensure_ascii=False), encoding="utf-8")
         print(f"[ORCH] Navigation map: {nav_path}")
 
+    async def _build_iframe_route_map(self):
+        """Build iframe_route_map.json — maps container pages to iframe src URLs and matched content pages."""
+        import re
+        from urllib.parse import urljoin
+        
+        analysis_dir = self.output_dir / "analysis"
+        if not analysis_dir.exists():
+            return
+        
+        # Build URL -> page directory lookup
+        url_to_page = {}
+        for page_dir in sorted(analysis_dir.iterdir()):
+            if not page_dir.is_dir() or not page_dir.name.startswith("page_"):
+                continue
+            idx_file = page_dir / "index.json"
+            if idx_file.exists():
+                try:
+                    data = json.loads(idx_file.read_text(encoding="utf-8"))
+                    url_to_page[data.get("url", "")] = {
+                        "dir": page_dir.name,
+                        "title": data.get("title", ""),
+                        "depth": data.get("depth", 0),
+                    }
+                except Exception:
+                    continue
+        
+        route_map = []
+        for page_dir in sorted(analysis_dir.iterdir()):
+            if not page_dir.is_dir() or not page_dir.name.startswith("page_"):
+                continue
+            dom_file = page_dir / "dom.html"
+            idx_file = page_dir / "index.json"
+            if not dom_file.exists() or not idx_file.exists():
+                continue
+            
+            try:
+                html = dom_file.read_text(encoding="utf-8")
+                page_data = json.loads(idx_file.read_text(encoding="utf-8"))
+                page_url = page_data.get("url", "")
+                
+                # Extract all iframe src attributes
+                iframe_srcs = re.findall(r'<iframe[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE)
+                
+                for src in iframe_srcs:
+                    if not src or src.startswith("javascript:"):
+                        continue
+                    absolute_src = urljoin(page_url, src)
+                    
+                    # Find best matching cloned page for this iframe URL
+                    matched = None
+                    for cloned_url, info in url_to_page.items():
+                        # Match by URL containment or path equality
+                        if absolute_src in cloned_url or cloned_url in absolute_src:
+                            # Prefer exact match or closest path
+                            if matched is None or abs(len(cloned_url) - len(absolute_src)) < abs(len(matched["url"]) - len(absolute_src)):
+                                matched = {"url": cloned_url, **info}
+                    
+                    route_map.append({
+                        "container_dir": page_dir.name,
+                        "container_url": page_url,
+                        "container_title": page_data.get("title", ""),
+                        "iframe_src": src,
+                        "iframe_absolute_url": absolute_src,
+                        "matched_content_page": matched,
+                    })
+            except Exception:
+                continue
+        
+        if route_map:
+            map_path = self.output_dir / "iframe_route_map.json"
+            map_path.write_text(json.dumps(route_map, indent=2, ensure_ascii=False), encoding="utf-8")
+            print(f"[ORCH] iframe route map: {map_path} ({len(route_map)} entries)")
+
     async def _finalize(self):
         """Generate manifest, index, and network session report."""
         manifest = {
@@ -1282,6 +1435,7 @@ class AgentOrchestrator:
             print(f"[ORCH] Session report: {session_path}")
         
         await self._generate_navigation()
+        await self._build_iframe_route_map()
         await self.cloner._generate_index_html()
         print(f"[ORCH] DFS clone complete. Visited: {len(self.state.visited_urls)}, Completed: {len(self.state.completed_urls)}, Blocked: {len(self.state.blocked_urls)}, Skipped: {len(self.state.skipped_urls)}")
 
