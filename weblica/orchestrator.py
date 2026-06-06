@@ -832,14 +832,12 @@ class AgentOrchestrator:
             json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8"
         )
         
-        # 2. dom.json
-        dom = {
-            "html_structure": analysis_data.get("html_structure", {}),
-            "body_text": analysis_data.get("body_text", ""),
-        }
-        (analysis_dir / "dom.json").write_text(
-            json.dumps(dom, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        # 2. dom.html
+        html_content = analysis_data.get("html_structure", "")
+        if html_content:
+            (analysis_dir / "dom.html").write_text(html_content, encoding="utf-8")
+        else:
+            (analysis_dir / "dom.html").write_text("<!-- no html content -->", encoding="utf-8")
         
         # 3. assets.json
         assets = {
@@ -893,7 +891,7 @@ class AgentOrchestrator:
             "api_calls_count": len(analysis_data.get("api_summary", [])),
             "files": {
                 "metadata": "metadata.json",
-                "dom": "dom.json",
+                "dom": "dom.html",
                 "assets": "assets.json",
                 "links": "links.json",
                 "forms": "forms.json",
