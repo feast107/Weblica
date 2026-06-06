@@ -225,6 +225,7 @@ class AgentOrchestrator:
         ctx: DecisionContext,
         actions: List[str],
         observation: Dict[str, Any] = None,
+        force_decide: bool = False,
     ) -> DecisionContext:
         """
         Unified agent decision entry point.
@@ -232,8 +233,9 @@ class AgentOrchestrator:
         STEPPED mode: calls decision_callback so the agent can choose the
         next atomic action (scroll, click, input, wait, continue, skip, etc.).
         
-        SUPERVISED mode: automatically sets recommended_action='continue',
-        letting the tool run the standard fast path.
+        SUPERVISED mode: auto-continue for fast path, BUT force_decide=True
+        is used at Checkpoint B (obstacles) and Checkpoint F (queue decisions)
+        where the agent MUST介入 regardless of mode.
         
         Either mode supports 'switch_mode' to dynamically toggle granularity.
         """
@@ -241,7 +243,12 @@ class AgentOrchestrator:
         ctx.available_actions = actions
         ctx.observation = observation or {}
 
-        if self.agent_mode == AgentMode.STEPPED and self.decision_callback:
+        should_decide = (
+            self.decision_callback and
+            (self.agent_mode == AgentMode.STEPPED or force_decide)
+        )
+
+        if should_decide:
             print(f"[ORCH] Checkpoint {ctx.phase.name} | actions={actions}")
             ctx = await self.decision_callback(ctx)
 
@@ -256,7 +263,7 @@ class AgentOrchestrator:
                 # Consume the switch and use the follow-up action
                 ctx.recommended_action = ctx.action_params.get("after_switch", "continue")
         else:
-            # SUPERVISED: auto-continue unless the action itself is abort/skip
+            # SUPERVISED fast path: auto-continue
             if ctx.recommended_action not in ("abort", "skip"):
                 ctx.recommended_action = "continue"
 
@@ -445,11 +452,12 @@ class AgentOrchestrator:
                 if ctx.recommended_action in ("scroll", "click", "input", "wait", "screenshot"):
                     await self._execute_action(self._active_page, ctx.recommended_action, ctx.action_params)
             
-            # Checkpoint B: Obstacle handling (BOTH modes)
+            # Checkpoint B: Obstacle handling (BOTH modes — force decide)
             if ctx.obstacle != ObstacleType.NONE:
                 ctx = await self._agent_decide(
                     ctx,
                     actions=["retry", "skip", "manual", "auth", "abort"],
+                    force_decide=True,
                 )
                 yield ctx
                 
@@ -650,13 +658,14 @@ class AgentOrchestrator:
             await self._close_active_page()
             
             # =============================================================
-            # Checkpoint F: Queue decision (BOTH modes)
+            # Checkpoint F: Queue decision (BOTH modes — force decide)
             # This is the "方案2" supervised intervention point.
             # =============================================================
             if ctx.phase == ClonePhase.COMPLETED and ctx.discovered_links:
                 ctx = await self._agent_decide(
                     ctx,
                     actions=["continue", "filter_links", "add_link", "switch_mode", "abort"],
+                    force_decide=True,
                     observation={
                         "queue_size": len(self.state.url_queue),
                         "discovered_links": ctx.discovered_links,
@@ -721,10 +730,11 @@ class AgentOrchestrator:
         self._interceptor.start()
         
         try:
-            # Auth injection
-            if self.auth_manager and depth == 0 and len(self.state.visited_urls) == 1:
-                await self.auth_manager.apply_to_context(page.context, url)
+            # Auth injection: apply to context on every new page's context.
+            # For resumed sessions, the browser context is fresh, so we must
+            # re-inject cookies even if visited_urls > 1.
             if self.auth_manager:
+                await self.auth_manager.apply_to_context(page.context, url)
                 await self.auth_manager.apply_to_page(page)
             
             # Navigate
