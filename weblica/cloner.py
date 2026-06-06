@@ -168,7 +168,17 @@ class WebCloner:
             
             # Follow links if within depth limit
             if depth < self.max_depth:
-                for link in analysis.links[:20]:  # Limit to 20 links per page
+                # Filter out dangerous links that could log us out
+                DANGEROUS = ['logout', 'signout', 'exit', 'quit', 'sign-out', 'log-out']
+                safe_links = [
+                    link for link in analysis.links[:20]  # Limit to 20 links per page
+                    if not any(d in link.lower() for d in DANGEROUS)
+                ]
+                if len(safe_links) < len(analysis.links[:20]):
+                    skipped = len(analysis.links[:20]) - len(safe_links)
+                    print(f"    [FILTER] Skipped {skipped} dangerous link(s) (logout/signout)")
+                
+                for link in safe_links:
                     await self._clone_page(link, depth + 1)
                     
         except Exception as e:

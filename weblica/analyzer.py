@@ -279,7 +279,7 @@ class SmartAnalyzer:
         """)
 
     async def _extract_links(self, page: Page, base_url: str) -> List[str]:
-        """Extract all internal links."""
+        """Extract all internal links, filtering out dangerous ones (logout, etc.)."""
         links = await page.evaluate("""
             () => Array.from(new Set(
                 Array.from(document.querySelectorAll('a[href]'))
@@ -288,7 +288,30 @@ class SmartAnalyzer:
             ))
         """)
         base_domain = urlparse(base_url).netloc
-        return [l for l in links if urlparse(l).netloc == base_domain]
+        internal = [l for l in links if urlparse(l).netloc == base_domain]
+        
+        # Filter out dangerous links that would log the user out or perform destructive actions
+        DANGEROUS_PATHS = ['logout', 'signout', 'exit', 'quit', 'sign-out', 'log-out']
+        DANGEROUS_QUERIES = ['action=logout', 'action=signout', 'logout=true', 'signout=true']
+        safe_links = []
+        for link in internal:
+            lower = link.lower()
+            path = urlparse(link).path.lower()
+            query = urlparse(link).query.lower()
+            
+            # Skip if path contains logout/signout keywords
+            if any(d in path for d in DANGEROUS_PATHS):
+                continue
+            # Skip if query string triggers logout action
+            if any(d in query for d in DANGEROUS_QUERIES):
+                continue
+            # Skip mailto: / tel: (should already be filtered by http check, but be safe)
+            if lower.startswith(('mailto:', 'tel:')):
+                continue
+            
+            safe_links.append(link)
+        
+        return safe_links
 
     async def _extract_buttons(self, page: Page) -> List[str]:
         """Extract button texts."""

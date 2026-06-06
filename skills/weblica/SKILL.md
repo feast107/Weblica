@@ -76,6 +76,7 @@ python -m weblica clone <URL> [OPTIONS]
 | `--humanize` | `True` | Human-like mouse/keyboard/scroll behavior (CloakBrowser mode) |
 | `--no-humanize` | `False` | Disable human-like behavior (faster, less stealthy) |
 | `--agent-mode` | `False` | Enable Agent-in-the-Loop supervision (DFS, pause at obstacles) |
+| `--agent-stepped` | `False` | Start in STEPPED mode: agent approves every atomic action |
 
 **Authentication options for `clone`:**
 
@@ -102,9 +103,15 @@ python -m weblica clone <URL> [OPTIONS]
 │   ├── js/                    # Downloaded scripts
 │   ├── images/                # Downloaded images
 │   └── fonts/                 # Downloaded fonts
-├── analysis_1.json            # SmartAnalyzer output + network traffic
-│                              #   - network_operations[]: full request/response chain
-│                              #   - api_summary[]: flat list of API calls
+├── analysis/                  # Split analysis files per page
+│   └── page_001/
+│       ├── index.json         # Overview: URL, asset/link/form counts, file manifest
+│       ├── metadata.json      # Title, description, meta tags, detected frameworks
+│       ├── dom.json           # HTML structure + body text
+│       ├── assets.json        # CSS, JS, images, fonts
+│       ├── links.json         # Discovered internal links
+│       ├── forms.json         # Forms and buttons
+│       └── network.json       # Full network traffic + API calls (largest file)
 ├── weblica-manifest.json      # Clone metadata
 ├── weblica-session.json       # Complete session recording (all operations + traffic)
 ├── weblica-index.html         # Browsable index page
@@ -159,28 +166,68 @@ For programmatic control within agent workflows:
 ```python
 import asyncio
 from weblica import WebCloner, WebReplayer
-from weblica.orchestrator import AgentOrchestrator, DecisionContext
+from weblica.orchestrator import AgentOrchestrator, DecisionContext, ObstacleType
+
+async def smart_agent(ctx: DecisionContext) -> DecisionContext:
+    """Custom agent: supervised by default, switch to stepped for complex pages."""
+    if ctx.obstacle == ObstacleType.LOGIN_REQUIRED:
+        ctx.recommended_action = "manual"
+        return ctx
+
+    # STEPPED mode: control every atomic action
+    if ctx.mode == "stepped":
+        if ctx.phase.name == "ANALYZING":
+            # After analysis, decide if interaction is needed
+            buttons = ctx.observation.get("buttons", [])
+            if any("load" in b.get("text", "") for b in buttons):
+                ctx.recommended_action = "click"
+                ctx.action_params = {"selector": "button.load-more"}
+            else:
+                ctx.recommended_action = "continue"
+        else:
+            ctx.recommended_action = "continue"
+        return ctx
+
+    # SUPERVISED mode: review at page completion
+    if ctx.phase.name == "COMPLETED":
+        dashboard_links = [l for l in ctx.discovered_links if "dashboard" in l]
+        if dashboard_links:
+            ctx.action_params["filter"] = dashboard_links
+        ctx.recommended_action = "continue"
+        return ctx
+
+    ctx.recommended_action = "continue"
+    return ctx
 
 async def workflow():
-    # Agent-in-the-Loop clone
     async with AgentOrchestrator(
         start_url="https://example.com",
         output_dir="./cloned",
         max_depth=2,
+        agent_mode="supervised",   # "supervised" or "stepped"
+        decision_callback=smart_agent,
     ) as orch:
         async for ctx in orch.run_dfs():
-            # Agent sees context at each decision point
-            if ctx.obstacle.name == "LOGIN_REQUIRED":
-                ctx.recommended_action = "manual"
-            else:
-                ctx.recommended_action = "continue"
+            # Yields at checkpoints (mode-dependent granularity)
+            pass
         print(orch.get_summary())
 ```
 
 ### Key Classes
 
-**`AgentOrchestrator`** — Agent-in-the-Loop cloning engine (NEW)
-- `async run_dfs()` — Generator yielding DecisionContext at each obstacle/completed page
+**`AgentOrchestrator`** — Hybrid-mode Agent-in-the-Loop cloning engine
+- `async run_dfs()` — Generator yielding DecisionContext at 6 checkpoints:
+  - **A**: Post-navigation (STEPPED only)
+  - **B**: Obstacle detected (both modes)
+  - **C**: Post-analysis (STEPPED only)
+  - **D**: Post-download (STEPPED only)
+  - **E**: Post-persist (STEPPED only)
+  - **F**: Queue decision (both modes — the "方案2" supervised review point)
+- **SUPERVISED mode**: Agent reviews at checkpoint F (page completion). Fast path.
+- **STEPPED mode**: Agent approves every atomic action at checkpoints A-E. Full control.
+- **Dynamic switching**: Agent can `switch_mode` at any checkpoint.
+- `async _observe_page(page)` — Collect visible buttons, inputs, scroll state, modals for agent decisions
+- `async _execute_action(page, action, params)` — Execute scroll/click/input/wait/screenshot
 - `async _wait_for_browser_login(page, timeout)` — Poll browser for login success
 - Browser page is KEPT OPEN when obstacles are detected
 - State persisted to `.weblica-state.json` after each page
@@ -231,8 +278,9 @@ Use when user wants a full clone with agent supervision.
 
 ```
 1. python -m weblica clone <URL> -o ./cloned --depth 2 --agent-mode
+   # Or stepped mode for full control: --agent-mode --agent-stepped
 2. Agent reviews decision contexts at each obstacle/completed page
-3. Read analysis_*.json for frameworks, APIs, assets, network traffic
+3. Read analysis/page_*/index.json for overview, then deep-dive into category files
 4. Read weblica-session.json for complete API call chains
 5. python -m weblica compare <URL> -d ./cloned -o ./comparison
 6. python -m weblica replay -d ./cloned -p 8080
@@ -309,8 +357,10 @@ Use when user wants to understand site architecture.
 
 ```
 1. python -m weblica clone <URL> -o ./cloned --depth 2 --agent-mode
-2. Read analysis_1.json to inspect frameworks, APIs, forms
-3. Read weblica-manifest.json for asset inventory
+2. Read analysis/page_001/index.json for overview
+3. Read analysis/page_001/metadata.json for frameworks
+4. Read analysis/page_001/network.json for API endpoints and traffic
+5. Read weblica-manifest.json for asset inventory
 ```
 
 ### Workflow C: Interaction Recording → Replay on Clone
@@ -324,6 +374,40 @@ Use when user wants to test if cloned site supports the same interactions.
 ```
 
 ## Agent Execution Guidelines
+
+### Hybrid Mode: SUPERVISED vs STEPPED
+
+The orchestrator supports two granularity levels, and the agent can switch dynamically:
+
+| Mode | Granularity | Yield Points | Use When |
+|------|-------------|--------------|----------|
+| **SUPERVISED** | Per-page | Checkpoints B (obstacles) and F (queue decision) | Most clones — fast, agent reviews results |
+| **STEPPED** | Per-action | Checkpoints A, B, C, D, E, F | Complex pages requiring precise interaction |
+
+**Dynamic switching:** The agent can `switch_mode` at any checkpoint:
+```json
+{"action": "switch_mode", "params": {"mode": "stepped", "after_switch": "continue"}}
+```
+
+### STEPPED Mode: Atomic Actions
+
+When in STEPPED mode, the agent can instruct these atomic operations at checkpoints A-E:
+
+| Action | Params | Description |
+|--------|--------|-------------|
+| `scroll` | `direction: bottom/top/down/up`, `amount` | Scroll the page |
+| `click` | `selector` or `target` | Click an element |
+| `input` | `selector`, `value` | Fill an input field |
+| `wait` | `ms` | Wait N milliseconds |
+| `screenshot` | `path` | Capture page screenshot |
+| `continue` | — | Proceed to next checkpoint |
+| `skip` | — | Skip current page |
+| `abort` | — | Stop entire clone job |
+| `switch_mode` | `mode`, `after_switch` | Toggle SUPERVISED/STEPPED |
+
+**Checkpoint F (Queue Decision) actions:**
+- `continue` — Queue discovered links normally
+- `filter_links` — Provide `filter: [...]` or `exclude: [...]` in `action_params` to control which links are queued
 
 ### Before Running
 
@@ -363,15 +447,32 @@ Use when user wants to test if cloned site supports the same interactions.
 
 ## Output File Formats
 
-### `analysis_N.json`
+### `analysis/page_NNN/` directory
 
-Contains full page analysis:
-- `url`, `title`, `description`
-- `html_structure` — Full page HTML
-- `stylesheets`, `scripts`, `images`, `fonts` — Asset lists with URLs
+Each cloned page gets its own directory with split category files:
+
+**`index.json`** — Quick overview
+- `page_index`, `url`, `title`, `assets_count`, `links_count`, `forms_count`, `api_calls_count`
+- `files` — manifest pointing to other files in the directory
+
+**`metadata.json`** — High-level page info
+- `url`, `title`, `description`, `meta_tags`, `favicon`, `frameworks`
+
+**`dom.json`** — DOM and text content
+- `html_structure`, `body_text`
+
+**`assets.json`** — Asset inventory
+- `stylesheets`, `scripts`, `images`, `fonts`
+
+**`links.json`** — Discovered internal links
+
+**`forms.json`** — Interactive elements
+- `forms`, `buttons`
+
+**`network.json`** — Network traffic (largest file)
 - `api_endpoints` — Discovered API patterns
-- `frameworks` — Detected frameworks with confidence scores
-- `forms`, `links`, `buttons` — Interactive element inventory
+- `api_summary` — Flat list of all API calls
+- `network_operations` — Full request/response chain with headers and body previews
 
 ### `weblica-manifest.json`
 

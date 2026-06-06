@@ -64,6 +64,12 @@ class ObstacleType(Enum):
     UNKNOWN = auto()
 
 
+class AgentMode(Enum):
+    """Agent supervision mode."""
+    SUPERVISED = "supervised"   # Coarse-grained: agent介入 at page completion (方案2)
+    STEPPED = "stepped"         # Fine-grained: agent介入 at every atomic action (方案4)
+
+
 @dataclass
 class PageSnapshot:
     """Lightweight snapshot of a page for agent decision-making."""
@@ -83,6 +89,10 @@ class DecisionContext:
     """
     Complete context presented to the agent at a decision point.
     The agent reads this, chooses an action, and the orchestrator resumes.
+    
+    In STEPPED mode, the agent sees every atomic operation and decides
+    the next action. In SUPERVISED mode, the agent only sees high-level
+    page results and can switch modes for complex pages.
     """
     phase: ClonePhase
     obstacle: ObstacleType
@@ -102,6 +112,11 @@ class DecisionContext:
     recommended_action: str = "continue"
     action_params: Dict[str, Any] = field(default_factory=dict)
     notes: str = ""
+    
+    # Hybrid mode support
+    mode: str = "supervised"
+    available_actions: List[str] = field(default_factory=list)
+    observation: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -145,6 +160,7 @@ class AgentOrchestrator:
         decision_callback: Optional[Callable[[DecisionContext], Awaitable[DecisionContext]]] = None,
         state_file: Optional[str] = None,
         humanize: bool = True,
+        agent_mode: str = "supervised",
     ):
         self.start_url = start_url
         self.output_dir = Path(output_dir)
@@ -155,6 +171,7 @@ class AgentOrchestrator:
         self.decision_callback = decision_callback
         self.state_file = state_file or str(self.output_dir / ".weblica-state.json")
         self.humanize = humanize
+        self.agent_mode = AgentMode(agent_mode)
         
         self.cloner: Optional[WebCloner] = None
         self.state: Optional[CloneState] = None
@@ -166,6 +183,9 @@ class AgentOrchestrator:
         
         # Network interceptor for the current page
         self._interceptor: Optional[NetworkInterceptor] = None
+        
+        # Last decision context (for stepped mode checkpoint communication)
+        self._last_decision_ctx: Optional[DecisionContext] = None
 
     async def __aenter__(self):
         self.cloner = WebCloner(
@@ -196,15 +216,187 @@ class AgentOrchestrator:
                 pass
             self._active_page = None
 
+    # ------------------------------------------------------------------
+    # Hybrid-mode Agent helpers
+    # ------------------------------------------------------------------
+
+    async def _agent_decide(
+        self,
+        ctx: DecisionContext,
+        actions: List[str],
+        observation: Dict[str, Any] = None,
+    ) -> DecisionContext:
+        """
+        Unified agent decision entry point.
+        
+        STEPPED mode: calls decision_callback so the agent can choose the
+        next atomic action (scroll, click, input, wait, continue, skip, etc.).
+        
+        SUPERVISED mode: automatically sets recommended_action='continue',
+        letting the tool run the standard fast path.
+        
+        Either mode supports 'switch_mode' to dynamically toggle granularity.
+        """
+        ctx.mode = self.agent_mode.value
+        ctx.available_actions = actions
+        ctx.observation = observation or {}
+
+        if self.agent_mode == AgentMode.STEPPED and self.decision_callback:
+            print(f"[ORCH] Checkpoint {ctx.phase.name} | actions={actions}")
+            ctx = await self.decision_callback(ctx)
+
+            # Handle dynamic mode switching
+            if ctx.recommended_action == "switch_mode":
+                new_mode = ctx.action_params.get(
+                    "mode",
+                    "supervised" if self.agent_mode == AgentMode.STEPPED else "stepped",
+                )
+                self.agent_mode = AgentMode(new_mode)
+                print(f"[ORCH] Agent switched mode -> {new_mode}")
+                # Consume the switch and use the follow-up action
+                ctx.recommended_action = ctx.action_params.get("after_switch", "continue")
+        else:
+            # SUPERVISED: auto-continue unless the action itself is abort/skip
+            if ctx.recommended_action not in ("abort", "skip"):
+                ctx.recommended_action = "continue"
+
+        self._last_decision_ctx = ctx
+        return ctx
+
+    async def _observe_page(self, page: Page) -> Dict[str, Any]:
+        """Collect lightweight observation data for agent decision-making."""
+        try:
+            url = page.url
+            title = await page.title()
+
+            # Visible interactive elements
+            buttons = await page.evaluate("""
+                () => Array.from(document.querySelectorAll('button, a[href], [role="button"], input[type="submit"]'))
+                    .filter(el => {
+                        const rect = el.getBoundingClientRect();
+                        return rect.width > 0 && rect.height > 0;
+                    })
+                    .map(el => ({
+                        tag: el.tagName.toLowerCase(),
+                        text: (el.textContent || el.value || '').trim().slice(0, 50),
+                        id: el.id || '',
+                        class: (el.className || '').toString().split(' ')[0],
+                        href: el.href || '',
+                    }))
+                    .slice(0, 20)
+            """)
+
+            inputs = await page.evaluate("""
+                () => Array.from(document.querySelectorAll('input, textarea, select'))
+                    .filter(el => {
+                        const rect = el.getBoundingClientRect();
+                        return rect.width > 0 && rect.height > 0;
+                    })
+                    .map(el => ({
+                        type: el.type || el.tagName.toLowerCase(),
+                        name: el.name || '',
+                        placeholder: el.placeholder || '',
+                        id: el.id || '',
+                    }))
+                    .slice(0, 10)
+            """)
+
+            scroll = await page.evaluate("""
+                () => ({
+                    scrollY: window.scrollY,
+                    scrollHeight: document.body.scrollHeight,
+                    clientHeight: window.innerHeight,
+                    atBottom: (window.scrollY + window.innerHeight) >= document.body.scrollHeight - 100
+                })
+            """)
+
+            modals = await page.evaluate("""
+                () => Array.from(document.querySelectorAll('.modal, [role="dialog"], .overlay, .popup, .toast, .ant-modal, .el-dialog'))
+                    .map(el => ({
+                        className: el.className || '',
+                        id: el.id || '',
+                        visible: el.offsetParent !== null,
+                    }))
+                    .slice(0, 5)
+            """)
+
+            return {
+                "url": url,
+                "title": title,
+                "buttons": buttons,
+                "inputs": inputs,
+                "scroll": scroll,
+                "modals": modals,
+            }
+        except Exception as e:
+            return {"error": str(e), "url": getattr(page, 'url', 'unknown')}
+
+    async def _execute_action(self, page: Page, action: str, params: Dict[str, Any]):
+        """Execute a single atomic action instructed by the agent."""
+        target = params.get("target", "") or params.get("selector", "")
+
+        if action == "scroll":
+            direction = params.get("direction", "bottom")
+            amount = params.get("amount", "0.8")
+            if direction == "bottom":
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            elif direction == "top":
+                await page.evaluate("window.scrollTo(0, 0)")
+            elif direction == "down":
+                await page.evaluate(f"window.scrollBy(0, window.innerHeight * {amount})")
+            elif direction == "up":
+                await page.evaluate(f"window.scrollBy(0, -window.innerHeight * {amount})")
+            print(f"    [AGENT] Scroll {direction}")
+            await asyncio.sleep(1.5)
+
+        elif action == "click":
+            selector = target
+            if selector:
+                try:
+                    await page.click(selector)
+                    print(f"    [AGENT] Click: {selector}")
+                    await asyncio.sleep(2)
+                except Exception as e:
+                    print(f"    [AGENT] Click failed: {selector} -> {e}")
+
+        elif action == "input":
+            selector = target
+            value = params.get("value", "")
+            if selector and value:
+                try:
+                    await page.fill(selector, value)
+                    print(f"    [AGENT] Input: {selector} = {value}")
+                except Exception as e:
+                    print(f"    [AGENT] Input failed: {selector} -> {e}")
+
+        elif action == "wait":
+            ms = params.get("ms", 2000)
+            print(f"    [AGENT] Wait {ms}ms")
+            await asyncio.sleep(ms / 1000)
+
+        elif action == "screenshot":
+            path = params.get("path", f"screenshot_{int(asyncio.get_event_loop().time())}.png")
+            try:
+                await page.screenshot(path=str(self.output_dir / path))
+                print(f"    [AGENT] Screenshot: {path}")
+            except Exception as e:
+                print(f"    [AGENT] Screenshot failed: {e}")
+
+    # ------------------------------------------------------------------
+    # Core DFS loop (hybrid mode)
+    # ------------------------------------------------------------------
+
     async def run_dfs(self):
         """
-        Generator-style DFS clone with agent decision points.
-        Yields a DecisionContext at every obstacle or after every page analysis.
+        Hybrid-mode DFS clone with agent decision points.
         
-        CRITICAL: When an obstacle is detected, the browser page is NOT closed.
-        The user can interact with the browser window. The orchestrator polls
-        the page state and continues automatically once the obstacle clears.
+        SUPERVISED mode (方案2): Agent介入 at page completion. Fast path.
+        STEPPED mode (方案4): Agent介入 at every atomic action. Full control.
+        
+        The agent can dynamically switch modes via 'switch_mode' action.
         """
+        print(f"[ORCH] Starting DFS in {self.agent_mode.value.upper()} mode")
+        
         # Initialize or resume state
         if Path(self.state_file).exists():
             print(f"[ORCH] Resuming from state file: {self.state_file}")
@@ -231,100 +423,271 @@ class AgentOrchestrator:
             
             self.state.visited_urls.append(url)
             
-            # ===== PHASE 1: Open page, navigate, detect obstacles =====
-            # Page stays open after this call if obstacle is found
+            # =============================================================
+            # PHASE 1: Navigate & detect obstacles
+            # =============================================================
             ctx = await self._process_page_phase1(url, depth, parent)
             
-            # ===== DECISION POINT: Yield to agent =====
-            if ctx.obstacle != ObstacleType.NONE or ctx.phase in (ClonePhase.BLOCKED, ClonePhase.COMPLETED):
-                if self.decision_callback:
-                    ctx = await self.decision_callback(ctx)
+            # Checkpoint A: Post-navigation (STEPPED mode only)
+            if self.agent_mode == AgentMode.STEPPED and ctx.obstacle == ObstacleType.NONE:
+                ctx = await self._agent_decide(
+                    ctx,
+                    actions=["analyze", "scroll", "click", "wait", "screenshot", "skip", "switch_mode", "abort"],
+                    observation=await self._observe_page(self._active_page),
+                )
                 yield ctx
+                if ctx.recommended_action == "abort":
+                    break
+                if ctx.recommended_action == "skip":
+                    self.state.skipped_urls.append(url)
+                    await self._close_active_page()
+                    continue
+                if ctx.recommended_action in ("scroll", "click", "input", "wait", "screenshot"):
+                    await self._execute_action(self._active_page, ctx.recommended_action, ctx.action_params)
             
-            # ===== APPLY AGENT DECISION =====
-            if ctx.recommended_action == "abort":
-                print("[ORCH] Agent requested abort. Stopping.")
-                break
-            
-            elif ctx.recommended_action == "skip":
-                self.state.skipped_urls.append(url)
-                await self._close_active_page()
-                continue
-            
-            elif ctx.recommended_action == "retry":
-                # Agent wants to retry - check if user solved the obstacle in browser
-                if self._active_page and ctx.obstacle == ObstacleType.LOGIN_REQUIRED:
-                    print("[ORCH] Checking if user completed login in browser...")
-                    logged_in = await self._wait_for_browser_login(self._active_page, timeout=600)
-                    if logged_in:
-                        print("[ORCH] Login detected! Re-analyzing page...")
-                        ctx.obstacle = ObstacleType.NONE
-                        # Don't re-add to queue - continue processing this page now
+            # Checkpoint B: Obstacle handling (BOTH modes)
+            if ctx.obstacle != ObstacleType.NONE:
+                ctx = await self._agent_decide(
+                    ctx,
+                    actions=["retry", "skip", "manual", "auth", "abort"],
+                )
+                yield ctx
+                
+                if ctx.recommended_action == "abort":
+                    break
+                elif ctx.recommended_action == "skip":
+                    self.state.skipped_urls.append(url)
+                    await self._close_active_page()
+                    continue
+                elif ctx.recommended_action == "retry":
+                    if self._active_page and ctx.obstacle == ObstacleType.LOGIN_REQUIRED:
+                        logged_in = await self._wait_for_browser_login(self._active_page, timeout=600)
+                        if logged_in:
+                            ctx.obstacle = ObstacleType.NONE
+                        else:
+                            self.state.blocked_urls.append({
+                                "url": url,
+                                "reason": ctx.notes or "login not completed",
+                                "snapshot": asdict(ctx.snapshot),
+                            })
+                            await self._close_active_page()
+                            continue
                     else:
-                        print("[ORCH] Login not detected. Blocking page.")
-                        self.state.blocked_urls.append({
-                            "url": url,
-                            "reason": ctx.notes or "login not completed",
-                            "snapshot": asdict(ctx.snapshot),
-                        })
+                        self.state.visited_urls.remove(url)
+                        self.state.url_queue.append((url, depth, parent))
                         await self._close_active_page()
                         continue
-                else:
-                    # Simple retry: re-queue
+                elif ctx.recommended_action == "auth":
+                    await self._apply_agent_auth(ctx.action_params)
                     self.state.visited_urls.remove(url)
                     self.state.url_queue.append((url, depth, parent))
                     await self._close_active_page()
                     continue
-            
-            elif ctx.recommended_action == "auth":
-                await self._apply_agent_auth(ctx.action_params)
-                self.state.visited_urls.remove(url)
-                self.state.url_queue.append((url, depth, parent))
-                await self._close_active_page()
-                continue
-            
-            elif ctx.recommended_action == "manual":
-                # Agent wants user to manually handle this page in the browser
-                if self._active_page and ctx.obstacle == ObstacleType.LOGIN_REQUIRED:
-                    print("[ORCH] MANUAL MODE: Please complete login in the browser window.")
-                    print("[ORCH] The browser will stay open. I'll detect when you're done.")
-                    logged_in = await self._wait_for_browser_login(self._active_page, timeout=600)
-                    if logged_in:
-                        print("[ORCH] Login detected! Continuing...")
-                        ctx.obstacle = ObstacleType.NONE
+                elif ctx.recommended_action == "manual":
+                    if self._active_page and ctx.obstacle == ObstacleType.LOGIN_REQUIRED:
+                        logged_in = await self._wait_for_browser_login(self._active_page, timeout=600)
+                        if logged_in:
+                            ctx.obstacle = ObstacleType.NONE
+                        else:
+                            self.state.blocked_urls.append({
+                                "url": url,
+                                "reason": ctx.notes or "manual login not completed",
+                                "snapshot": asdict(ctx.snapshot),
+                            })
+                            await self._close_active_page()
+                            continue
                     else:
-                        print("[ORCH] Login not completed. Marking as blocked.")
                         self.state.blocked_urls.append({
                             "url": url,
-                            "reason": ctx.notes or "manual login not completed",
+                            "reason": ctx.notes or "manual intervention requested",
                             "snapshot": asdict(ctx.snapshot),
                         })
                         await self._close_active_page()
                         continue
-                else:
-                    self.state.blocked_urls.append({
-                        "url": url,
-                        "reason": ctx.notes or "manual intervention requested",
-                        "snapshot": asdict(ctx.snapshot),
-                    })
-                    await self._close_active_page()
-                    continue
             
-            # ===== PHASE 2: Analyze, download, persist =====
-            # Only reach here if obstacle is NONE (or was cleared by user login)
+            # =============================================================
+            # PHASE 2: Analyze, interact, download, persist (inline)
+            # =============================================================
             if ctx.obstacle == ObstacleType.NONE and self._active_page:
-                ctx = await self._process_page_phase2(url, depth, ctx, self._active_page)
-                self.state.completed_urls.append(url)
-                ctx.phase = ClonePhase.COMPLETED
+                page = self._active_page
+                page_idx = len(self.state.visited_urls)
+                
+                try:
+                    # ---- 2.1 Analyze page ----
+                    ctx.phase = ClonePhase.ANALYZING
+                    analysis = await self.analyzer.analyze(page)
+                    ctx.full_analysis = analysis
+                    ctx.discovered_links = analysis.links[:20]
+                    ctx.discovered_assets = (
+                        len(analysis.stylesheets) + len(analysis.scripts) +
+                        len(analysis.images) + len(analysis.fonts)
+                    )
+                    
+                    # Record navigation traffic
+                    nav_interactions = []
+                    if self._interceptor:
+                        nav_interactions = self._interceptor.stop_and_collect()
+                        self._interceptor.clear()
+                        self._interceptor.start()
+                    
+                    nav_op = PageOperation(
+                        operation_id=len(self.recorder.operations) + 1,
+                        page_url=url,
+                        depth=depth,
+                        action="navigate",
+                        target=url,
+                        interactions=nav_interactions,
+                    )
+                    self.recorder.operations.append(nav_op)
+                    
+                    api_count = len(nav_op.api_calls)
+                    if api_count > 0:
+                        print(f"    [API] Captured {api_count} API calls during navigation")
+                        for api in nav_op.api_calls[:5]:
+                            status = api.response.status if api.response else "?"
+                            print(f"      {api.request.method} {api.request.url[:80]} -> {status}")
+                    
+                    # Checkpoint C: Post-analysis (STEPPED mode)
+                    if self.agent_mode == AgentMode.STEPPED:
+                        ctx = await self._agent_decide(
+                            ctx,
+                            actions=["continue", "scroll", "click", "input", "wait", "screenshot", "skip", "switch_mode", "abort"],
+                            observation=await self._observe_page(page),
+                        )
+                        yield ctx
+                        if ctx.recommended_action == "abort":
+                            ctx.phase = ClonePhase.BLOCKED
+                            await self._close_active_page()
+                            break
+                        if ctx.recommended_action == "skip":
+                            ctx.phase = ClonePhase.SKIPPED
+                            await self._close_active_page()
+                            continue
+                    
+                    # ---- 2.2 Interact ----
+                    if self.agent_mode == AgentMode.STEPPED:
+                        # Agent-driven interaction loop
+                        while ctx.recommended_action in ("scroll", "click", "input", "wait", "screenshot"):
+                            await self._execute_action(page, ctx.recommended_action, ctx.action_params)
+                            ctx = await self._agent_decide(
+                                ctx,
+                                actions=["continue", "scroll", "click", "input", "wait", "screenshot", "skip", "abort"],
+                                observation=await self._observe_page(page),
+                            )
+                            yield ctx
+                            if ctx.recommended_action in ("abort", "skip"):
+                                break
+                        
+                        if ctx.recommended_action == "abort":
+                            ctx.phase = ClonePhase.BLOCKED
+                            await self._close_active_page()
+                            break
+                        if ctx.recommended_action == "skip":
+                            ctx.phase = ClonePhase.SKIPPED
+                            await self._close_active_page()
+                            continue
+                    else:
+                        # SUPERVISED: automatic interactions
+                        await self._auto_interact(page, url, depth)
+                    
+                    # ---- 2.3 Download assets ----
+                    ctx.phase = ClonePhase.ASSET_DOWNLOADING
+                    await self.cloner._download_assets(analysis, url)
+                    
+                    # Checkpoint D: Post-download (STEPPED mode)
+                    if self.agent_mode == AgentMode.STEPPED:
+                        ctx = await self._agent_decide(
+                            ctx,
+                            actions=["continue", "persist", "skip", "abort"],
+                        )
+                        yield ctx
+                        if ctx.recommended_action == "abort":
+                            ctx.phase = ClonePhase.BLOCKED
+                            await self._close_active_page()
+                            break
+                        if ctx.recommended_action == "skip":
+                            ctx.phase = ClonePhase.SKIPPED
+                            await self._close_active_page()
+                            continue
+                    
+                    # ---- 2.4 Persist HTML ----
+                    ctx.phase = ClonePhase.PERSISTING
+                    html = await self.cloner._rewrite_html(page, analysis, url)
+                    page_filename = self.cloner._get_page_filename(url)
+                    html_path = self.output_dir / page_filename
+                    html_path.write_text(html, encoding="utf-8")
+                    
+                    # Checkpoint E: Post-persist (STEPPED mode)
+                    if self.agent_mode == AgentMode.STEPPED:
+                        ctx = await self._agent_decide(
+                            ctx,
+                            actions=["continue", "skip", "abort"],
+                        )
+                        yield ctx
+                        if ctx.recommended_action == "abort":
+                            ctx.phase = ClonePhase.BLOCKED
+                            await self._close_active_page()
+                            break
+                        if ctx.recommended_action == "skip":
+                            ctx.phase = ClonePhase.SKIPPED
+                            await self._close_active_page()
+                            continue
+                    
+                    # ---- 2.5 Save analysis split ----
+                    await self._save_analysis_split(url, depth, analysis, page_idx)
+                    
+                    self.state.completed_urls.append(url)
+                    ctx.phase = ClonePhase.COMPLETED
+                    
+                    print(f"    [OK] Completed: {page_filename} | Assets: {ctx.discovered_assets} | Links: {len(ctx.discovered_links)} | APIs: {api_count} | Analysis: analysis/page_{page_idx:03d}/")
+                    
+                except Exception as e:
+                    print(f"    [ERR] Phase2 failed for {url}: {e}")
+                    ctx.obstacle = ObstacleType.UNKNOWN
+                    ctx.phase = ClonePhase.BLOCKED
             
-            # Clean up
+            # Clean up page
             await self._close_active_page()
             
-            # Queue discovered links (DFS)
+            # =============================================================
+            # Checkpoint F: Queue decision (BOTH modes)
+            # This is the "方案2" supervised intervention point.
+            # =============================================================
             if ctx.phase == ClonePhase.COMPLETED and ctx.discovered_links:
+                ctx = await self._agent_decide(
+                    ctx,
+                    actions=["continue", "filter_links", "add_link", "switch_mode", "abort"],
+                    observation={
+                        "queue_size": len(self.state.url_queue),
+                        "discovered_links": ctx.discovered_links,
+                        "current_depth": depth,
+                    },
+                )
+                yield ctx
+                
+                if ctx.recommended_action == "abort":
+                    break
+                if ctx.recommended_action == "switch_mode":
+                    pass  # Already handled inside _agent_decide
+                
+                # Apply link filtering if agent provided it
+                links_to_queue = ctx.discovered_links
+                if ctx.action_params.get("filter"):
+                    allowed = set(ctx.action_params["filter"])
+                    links_to_queue = [l for l in links_to_queue if l in allowed]
+                if ctx.action_params.get("exclude"):
+                    excluded = set(ctx.action_params["exclude"])
+                    links_to_queue = [l for l in links_to_queue if l not in excluded]
+                
+                # Safety net: dangerous links
+                DANGEROUS = ['logout', 'signout', 'exit', 'quit', 'sign-out', 'log-out']
+                safe_links = [l for l in links_to_queue if not any(d in l.lower() for d in DANGEROUS)]
+                if len(safe_links) < len(links_to_queue):
+                    print(f"    [FILTER] Skipped {len(links_to_queue)-len(safe_links)} dangerous link(s)")
+                
                 new_items = [
                     (link, depth + 1, url)
-                    for link in ctx.discovered_links
+                    for link in safe_links
                     if link not in self.state.visited_urls
                     and link not in [u for u, _, _ in self.state.url_queue]
                 ]
@@ -422,169 +785,114 @@ class AgentOrchestrator:
         
         return ctx
 
-    async def _process_page_phase2(self, url: str, depth: int, ctx: DecisionContext, page: Page) -> DecisionContext:
-        """
-        Phase 2: Analyze page structure, download assets, persist HTML.
-        Captures all network traffic during navigation and optional auto-interactions.
-        Only called when no obstacles are present (or obstacles were cleared).
-        """
-        try:
-            ctx.phase = ClonePhase.ANALYZING
-            analysis = await self.analyzer.analyze(page)
-            ctx.full_analysis = analysis
-            ctx.discovered_links = analysis.links[:20]
-            ctx.discovered_assets = len(analysis.stylesheets) + len(analysis.scripts) + len(analysis.images) + len(analysis.fonts)
-            
-            # Record the navigation operation with captured traffic
-            nav_interactions = []
-            if self._interceptor:
-                nav_interactions = self._interceptor.stop_and_collect()
-                self._interceptor.clear()
-                self._interceptor.start()  # Restart for auto-interactions
-            
-            nav_op = PageOperation(
-                operation_id=len(self.recorder.operations) + 1,
-                page_url=url,
-                depth=depth,
-                action="navigate",
-                target=url,
-                interactions=nav_interactions,
-            )
-            self.recorder.operations.append(nav_op)
-            
-            api_count = len(nav_op.api_calls)
-            if api_count > 0:
-                print(f"    [API] Captured {api_count} API calls during navigation")
-                for api in nav_op.api_calls[:5]:
-                    status = api.response.status if api.response else "?"
-                    print(f"      {api.request.method} {api.request.url[:80]} -> {status}")
-            
-            # Optional: Auto-interact to trigger lazy-loaded content and APIs
-            await self._auto_interact(page, url, depth)
-            
-            ctx.phase = ClonePhase.ASSET_DOWNLOADING
-            await self.cloner._download_assets(analysis, url)
-            
-            ctx.phase = ClonePhase.PERSISTING
-            html = await self.cloner._rewrite_html(page, analysis, url)
-            page_filename = self.cloner._get_page_filename(url)
-            html_path = self.output_dir / page_filename
-            html_path.write_text(html, encoding="utf-8")
-            
-            # Build analysis with network traffic included
-            analysis_data = json.loads(self.analyzer.export_json(analysis))
-            analysis_data["network_operations"] = [
-                op.to_dict() for op in self.recorder.operations
-                if op.page_url == url
-            ]
-            analysis_data["api_summary"] = [
-                {
-                    "url": api.request.url,
-                    "method": api.request.method,
-                    "status": api.response.status if api.response else None,
-                    "resource_type": api.request.resource_type,
-                    "duration_ms": api.duration_ms,
-                }
-                for op in self.recorder.operations
-                if op.page_url == url
-                for api in op.api_calls
-            ]
-            
-            # Save as split files under analysis/page_NNN/ directory
-            page_idx = len(self.state.visited_urls)
-            analysis_dir = self.output_dir / "analysis" / f"page_{page_idx:03d}"
-            analysis_dir.mkdir(parents=True, exist_ok=True)
-            
-            # 1. metadata.json — small, high-level info
-            metadata = {
-                "url": analysis_data.get("url"),
-                "title": analysis_data.get("title"),
-                "description": analysis_data.get("description"),
-                "meta_tags": analysis_data.get("meta_tags", []),
-                "favicon": analysis_data.get("favicon"),
-                "frameworks": analysis_data.get("frameworks", []),
+    async def _save_analysis_split(self, url: str, depth: int, analysis: PageAnalysis, page_idx: int):
+        """Save analysis as split files under analysis/page_NNN/ directory."""
+        # Build full analysis data with network traffic included
+        analysis_data = json.loads(self.analyzer.export_json(analysis))
+        analysis_data["network_operations"] = [
+            op.to_dict() for op in self.recorder.operations
+            if op.page_url == url
+        ]
+        analysis_data["api_summary"] = [
+            {
+                "url": api.request.url,
+                "method": api.request.method,
+                "status": api.response.status if api.response else None,
+                "resource_type": api.request.resource_type,
+                "duration_ms": api.duration_ms,
             }
-            (analysis_dir / "metadata.json").write_text(
-                json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
-            
-            # 2. dom.json — HTML structure + body text (can be large)
-            dom = {
-                "html_structure": analysis_data.get("html_structure", {}),
-                "body_text": analysis_data.get("body_text", ""),
-            }
-            (analysis_dir / "dom.json").write_text(
-                json.dumps(dom, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
-            
-            # 3. assets.json — stylesheets, scripts, images, fonts
-            assets = {
-                "stylesheets": analysis_data.get("stylesheets", []),
-                "scripts": analysis_data.get("scripts", []),
-                "images": analysis_data.get("images", []),
-                "fonts": analysis_data.get("fonts", []),
-            }
-            (analysis_dir / "assets.json").write_text(
-                json.dumps(assets, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
-            
-            # 4. links.json — discovered links
-            links_data = {
-                "links": analysis_data.get("links", []),
-            }
-            (analysis_dir / "links.json").write_text(
-                json.dumps(links_data, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
-            
-            # 5. forms.json — forms + buttons
-            forms_data = {
-                "forms": analysis_data.get("forms", []),
-                "buttons": analysis_data.get("buttons", []),
-            }
-            (analysis_dir / "forms.json").write_text(
-                json.dumps(forms_data, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
-            
-            # 6. network.json — API calls + operations (can be very large)
-            network_data = {
-                "api_endpoints": analysis_data.get("api_endpoints", []),
-                "api_summary": analysis_data.get("api_summary", []),
-                "network_operations": analysis_data.get("network_operations", []),
-            }
-            (analysis_dir / "network.json").write_text(
-                json.dumps(network_data, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
-            
-            # Also save a compact index.json for quick overview
-            index = {
-                "page_index": page_idx,
-                "url": analysis_data.get("url"),
-                "title": analysis_data.get("title"),
-                "assets_count": len(analysis_data.get("stylesheets", [])) + len(analysis_data.get("scripts", [])) + len(analysis_data.get("images", [])) + len(analysis_data.get("fonts", [])),
-                "links_count": len(analysis_data.get("links", [])),
-                "forms_count": len(analysis_data.get("forms", [])),
-                "api_calls_count": len(analysis_data.get("api_summary", [])),
-                "files": {
-                    "metadata": "metadata.json",
-                    "dom": "dom.json",
-                    "assets": "assets.json",
-                    "links": "links.json",
-                    "forms": "forms.json",
-                    "network": "network.json",
-                },
-            }
-            (analysis_dir / "index.json").write_text(
-                json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
-            
-            print(f"    [OK] Completed: {page_filename} | Assets: {ctx.discovered_assets} | Links: {len(ctx.discovered_links)} | APIs: {api_count} | Analysis: analysis/page_{page_idx:03d}/")
-            
-        except Exception as e:
-            print(f"    [ERR] Phase2 failed for {url}: {e}")
-            ctx.obstacle = ObstacleType.UNKNOWN
-            ctx.phase = ClonePhase.BLOCKED
+            for op in self.recorder.operations
+            if op.page_url == url
+            for api in op.api_calls
+        ]
         
-        return ctx
+        analysis_dir = self.output_dir / "analysis" / f"page_{page_idx:03d}"
+        analysis_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 1. metadata.json
+        metadata = {
+            "url": analysis_data.get("url"),
+            "title": analysis_data.get("title"),
+            "description": analysis_data.get("description"),
+            "meta_tags": analysis_data.get("meta_tags", []),
+            "favicon": analysis_data.get("favicon"),
+            "frameworks": analysis_data.get("frameworks", []),
+        }
+        (analysis_dir / "metadata.json").write_text(
+            json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        
+        # 2. dom.json
+        dom = {
+            "html_structure": analysis_data.get("html_structure", {}),
+            "body_text": analysis_data.get("body_text", ""),
+        }
+        (analysis_dir / "dom.json").write_text(
+            json.dumps(dom, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        
+        # 3. assets.json
+        assets = {
+            "stylesheets": analysis_data.get("stylesheets", []),
+            "scripts": analysis_data.get("scripts", []),
+            "images": analysis_data.get("images", []),
+            "fonts": analysis_data.get("fonts", []),
+        }
+        (analysis_dir / "assets.json").write_text(
+            json.dumps(assets, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        
+        # 4. links.json
+        links_data = {"links": analysis_data.get("links", [])}
+        (analysis_dir / "links.json").write_text(
+            json.dumps(links_data, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        
+        # 5. forms.json
+        forms_data = {
+            "forms": analysis_data.get("forms", []),
+            "buttons": analysis_data.get("buttons", []),
+        }
+        (analysis_dir / "forms.json").write_text(
+            json.dumps(forms_data, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        
+        # 6. network.json
+        network_data = {
+            "api_endpoints": analysis_data.get("api_endpoints", []),
+            "api_summary": analysis_data.get("api_summary", []),
+            "network_operations": analysis_data.get("network_operations", []),
+        }
+        (analysis_dir / "network.json").write_text(
+            json.dumps(network_data, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        
+        # index.json
+        index = {
+            "page_index": page_idx,
+            "url": analysis_data.get("url"),
+            "title": analysis_data.get("title"),
+            "assets_count": (
+                len(analysis_data.get("stylesheets", [])) +
+                len(analysis_data.get("scripts", [])) +
+                len(analysis_data.get("images", [])) +
+                len(analysis_data.get("fonts", []))
+            ),
+            "links_count": len(analysis_data.get("links", [])),
+            "forms_count": len(analysis_data.get("forms", [])),
+            "api_calls_count": len(analysis_data.get("api_summary", [])),
+            "files": {
+                "metadata": "metadata.json",
+                "dom": "dom.json",
+                "assets": "assets.json",
+                "links": "links.json",
+                "forms": "forms.json",
+                "network": "network.json",
+            },
+        }
+        (analysis_dir / "index.json").write_text(
+            json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
     
     async def _auto_interact(self, page: Page, url: str, depth: int):
         """

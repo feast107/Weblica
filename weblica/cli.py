@@ -146,6 +146,11 @@ Examples:
         action="store_true",
         help="Enable agent-in-the-loop supervision (DFS, pause at obstacles)",
     )
+    clone_parser.add_argument(
+        "--agent-stepped",
+        action="store_true",
+        help="Start in STEPPED mode: agent approves every atomic action (click, scroll, etc.)",
+    )
     
     # Replay command
     replay_parser = subparsers.add_parser(
@@ -207,15 +212,15 @@ Examples:
 
 async def default_agent_callback(ctx: DecisionContext) -> DecisionContext:
     """
-    Default agent callback for --agent-mode.
+    Default agent callback for hybrid-mode orchestrator.
     
-    With the new orchestrator design, the browser page STAYS OPEN when an
-    obstacle is detected. The user can interact with the real browser window.
+    Supports both SUPERVISED (coarse-grained) and STEPPED (fine-grained) modes.
+    Reads decisions from ./weblica-decision.json file.
     """
     import time
     
     print("\n" + "=" * 60)
-    print("AGENT DECISION POINT")
+    print(f"AGENT DECISION POINT  [mode={ctx.mode} | phase={ctx.phase.name}]")
     print("=" * 60)
     print(f"URL:        {ctx.snapshot.url}")
     print(f"Phase:      {ctx.phase.name}")
@@ -223,6 +228,8 @@ async def default_agent_callback(ctx: DecisionContext) -> DecisionContext:
     print(f"Title:      {ctx.snapshot.title}")
     print(f"Status:     {ctx.snapshot.status}")
     print(f"Depth:      {ctx.snapshot.depth}")
+    if ctx.available_actions:
+        print(f"Actions:    {', '.join(ctx.available_actions)}")
     if ctx.snapshot.has_login_form:
         print("[ALERT] Login form detected on page!")
     if ctx.snapshot.has_captcha:
@@ -235,22 +242,29 @@ async def default_agent_callback(ctx: DecisionContext) -> DecisionContext:
         print(f"Assets:     {ctx.discovered_assets}")
     if ctx.discovered_links:
         print(f"Links:      {len(ctx.discovered_links)}")
+    if ctx.observation:
+        obs = ctx.observation
+        if obs.get("buttons"):
+            print(f"Buttons:    {len(obs['buttons'])} visible")
+        if obs.get("inputs"):
+            print(f"Inputs:     {len(obs['inputs'])} visible")
+        if obs.get("scroll"):
+            s = obs["scroll"]
+            print(f"Scroll:     Y={s.get('scrollY', 0)} / H={s.get('scrollHeight', 0)} atBottom={s.get('atBottom', False)}")
+        if obs.get("modals"):
+            print(f"Modals:     {len(obs['modals'])} detected")
     print("-" * 60)
     
-    # If there's no obstacle, auto-continue
-    if ctx.obstacle == ObstacleType.NONE and ctx.phase == ClonePhase.COMPLETED:
-        ctx.recommended_action = "continue"
-        print("Auto-decision: continue (no obstacles)")
-        print("=" * 60 + "\n")
-        return ctx
-    
-    # Write context to file for external monitoring
+    # STEPPED mode: always write full context for external agent
+    # SUPERVISED mode: also write context at queue decision point
     context_file = Path("./weblica-decision-context.json")
-    context_file.write_text(json.dumps({
+    context_payload = {
         "url": ctx.snapshot.url,
         "phase": ctx.phase.name,
         "obstacle": ctx.obstacle.name,
         "title": ctx.snapshot.title,
+        "mode": ctx.mode,
+        "available_actions": ctx.available_actions,
         "has_login_form": ctx.snapshot.has_login_form,
         "has_captcha": ctx.snapshot.has_captcha,
         "error_indicators": ctx.snapshot.error_indicators,
@@ -258,57 +272,70 @@ async def default_agent_callback(ctx: DecisionContext) -> DecisionContext:
         "text_preview": ctx.snapshot.text_preview,
         "discovered_links": ctx.discovered_links[:10],
         "discovered_assets": ctx.discovered_assets,
+        "observation": ctx.observation,
         "retry_count": ctx.retry_count,
         "timestamp": time.time(),
-    }, indent=2, ensure_ascii=False), encoding="utf-8")
+    }
+    context_file.write_text(json.dumps(context_payload, indent=2, ensure_ascii=False), encoding="utf-8")
     
-    # Handle specific obstacles
-    if ctx.obstacle == ObstacleType.LOGIN_REQUIRED:
-        print("[DECISION] Login page detected.")
-        print("[DECISION] The browser window is OPEN. You can:")
-        print("  1. Type 'manual' -> I'll wait for you to login in the browser (page stays open)")
-        print("  2. Type 'skip'  -> Skip this page and continue with others")
-        print("  3. Type 'abort' -> Stop the entire clone job")
-        
-        decision_file = Path("./weblica-decision.json")
-        start = time.time()
-        while True:
-            if decision_file.exists():
-                try:
-                    decision = json.loads(decision_file.read_text(encoding="utf-8"))
-                    ctx.recommended_action = decision.get("action", "manual")
-                    ctx.action_params = decision.get("params", {})
-                    ctx.notes = decision.get("notes", ctx.notes)
-                    decision_file.unlink()
-                    print(f"Decision received: {ctx.recommended_action}")
-                    print("=" * 60 + "\n")
-                    return ctx
-                except Exception as e:
-                    print(f"Error reading decision file: {e}")
-            
-            if time.time() - start > 300:
-                print("[DECISION] Timeout (300s). Auto-selecting 'manual' - will wait for browser login.")
-                ctx.recommended_action = "manual"
+    # Auto-continue for non-interactive checkpoints in SUPERVISED mode
+    if ctx.mode == "supervised" and ctx.obstacle == ObstacleType.NONE and ctx.phase == ClonePhase.COMPLETED:
+        ctx.recommended_action = "continue"
+        print("Auto-decision: continue (supervised mode, page complete)")
+        print("=" * 60 + "\n")
+        return ctx
+    
+    # Wait for external decision file
+    decision_file = Path("./weblica-decision.json")
+    start = time.time()
+    timeout = 300
+    
+    print(f"[DECISION] Waiting for {decision_file} (timeout: {timeout}s)")
+    print(f"[DECISION] Available actions: {ctx.available_actions}")
+    if ctx.mode == "stepped":
+        print("[DECISION] STEPPED mode: you control every atomic action.")
+        print("  Examples:")
+        print('    {"action": "scroll", "params": {"direction": "bottom"}}')
+        print('    {"action": "click", "params": {"selector": "button.load-more"}}')
+        print('    {"action": "switch_mode", "params": {"mode": "supervised", "after_switch": "continue"}}')
+    print("-" * 60)
+    
+    while True:
+        if decision_file.exists():
+            try:
+                decision = json.loads(decision_file.read_text(encoding="utf-8"))
+                action = decision.get("action", "continue")
+                ctx.recommended_action = action
+                ctx.action_params = decision.get("params", {})
+                ctx.notes = decision.get("notes", ctx.notes)
+                decision_file.unlink()
+                print(f"Decision received: {action} {ctx.action_params}")
                 print("=" * 60 + "\n")
                 return ctx
-            
-            await asyncio.sleep(1)
-    
-    elif ctx.obstacle == ObstacleType.CAPTCHA:
-        print("[DECISION] CAPTCHA detected.")
-        print("[DECISION] Options: 'manual' (wait for you to solve), 'skip', 'abort'")
-        ctx.recommended_action = "manual"
-        print("Auto-selecting: manual")
-        print("=" * 60 + "\n")
-        return ctx
-    
-    else:
-        print("[DECISION] Unhandled obstacle.")
-        print("[DECISION] Options: 'skip', 'retry', 'abort'")
-        ctx.recommended_action = "skip"
-        print("Auto-selecting: skip")
-        print("=" * 60 + "\n")
-        return ctx
+            except Exception as e:
+                print(f"Error reading decision file: {e}")
+        
+        elapsed = time.time() - start
+        if elapsed > timeout:
+            print(f"[DECISION] Timeout ({timeout}s). Auto-selecting based on context.")
+            # Smart fallback
+            if ctx.obstacle == ObstacleType.LOGIN_REQUIRED:
+                ctx.recommended_action = "manual"
+            elif ctx.obstacle == ObstacleType.CAPTCHA:
+                ctx.recommended_action = "manual"
+            elif ctx.obstacle != ObstacleType.NONE:
+                ctx.recommended_action = "skip"
+            else:
+                ctx.recommended_action = "continue"
+            print(f"Auto-selecting: {ctx.recommended_action}")
+            print("=" * 60 + "\n")
+            return ctx
+        
+        # Print progress every 30s
+        if int(elapsed) % 30 == 0 and int(elapsed) > 0:
+            print(f"[DECISION] Still waiting... ({int(elapsed)}s / {timeout}s)")
+        
+        await asyncio.sleep(1)
 
 
 async def handle_clone(args):
@@ -345,6 +372,7 @@ async def handle_clone(args):
     
     # Agent mode uses orchestrator
     if args.agent_mode:
+        agent_mode = "stepped" if args.agent_stepped else "supervised"
         async with AgentOrchestrator(
             start_url=args.url,
             output_dir=args.output,
@@ -354,6 +382,7 @@ async def handle_clone(args):
             auth_manager=auth_manager,
             decision_callback=default_agent_callback,
             humanize=not args.no_humanize,
+            agent_mode=agent_mode,
         ) as orch:
             async for ctx in orch.run_dfs():
                 # The callback handles everything; this loop just drains the generator

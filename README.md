@@ -145,6 +145,7 @@ python -m weblica clone <URL> [OPTIONS]
 | `--humanize` | `True` | 人类化行为（鼠标/键盘/滚动），CloakBrowser 模式下生效 |
 | `--no-humanize` | `False` | 禁用人类化行为（更快但隐蔽性降低） |
 | `--agent-mode` | `False` | 启用 Agent-in-the-Loop 监督模式 |
+| `--agent-stepped` | `False` | 以步进模式启动：Agent 审批每个原子操作（点击/滚动/输入） |
 
 **认证选项：**
 
@@ -277,15 +278,18 @@ python -m weblica clone https://example.com --no-humanize
 
 ### 模板 A：Agent-in-the-Loop 克隆（推荐）
 
-适用于大多数场景，Agent 在每个页面监督执行。
+适用于大多数场景，Agent 在每个页面完成后监督审查（SUPERVISED 模式）。
+对于复杂页面，Agent 可动态切换到步进模式（STEPPED），逐操作审批。
 
 ```
 Step 1: python -m weblica clone <URL> -o ./cloned --depth 2 --agent-mode
-Step 2: 工具自动执行 DFS 遍历，遇到障碍时生成决策上下文
-Step 3: 读取 ./cloned/analysis_*.json，汇报检测到的框架和资源
-Step 4: python -m weblica compare <URL> -d ./cloned -o ./comparison
-Step 5: python -m weblica replay -d ./cloned -p 8080
-Step 6: 告知用户访问 http://localhost:8080/weblica-index.html
+        # 或步进模式: --agent-mode --agent-stepped
+Step 2: 工具自动执行 DFS 遍历，在检查点生成决策上下文
+Step 3: Agent 审查页面结果，决定哪些链接值得深入、是否需要额外交互
+Step 4: 读取 ./cloned/analysis/page_*/ 下的分析结果
+Step 5: python -m weblica compare <URL> -d ./cloned -o ./comparison
+Step 6: python -m weblica replay -d ./cloned -p 8080
+Step 7: 告知用户访问 http://localhost:8080/weblica-index.html
 ```
 
 ### 模板 D：人机协作克隆（需要登录）
@@ -341,22 +345,58 @@ Step 5: 对比回放结果，报告交互是否成功
 ```python
 import asyncio
 from weblica import WebCloner, WebReplayer
-from weblica.orchestrator import AgentOrchestrator, DecisionContext
+from weblica.orchestrator import AgentOrchestrator, DecisionContext, ObstacleType
+
+async def smart_agent_callback(ctx: DecisionContext) -> DecisionContext:
+    """Custom agent logic: supervised by default, switch to stepped for complex pages."""
+    
+    # Handle obstacles
+    if ctx.obstacle == ObstacleType.LOGIN_REQUIRED:
+        ctx.recommended_action = "manual"
+        return ctx
+    
+    # STEPPED mode: agent sees every atomic action
+    if ctx.mode == "stepped":
+        if ctx.phase.name == "ANALYZING":
+            # After analysis, decide if we need to interact
+            if any("load" in b.get("text", "") for b in ctx.observation.get("buttons", [])):
+                ctx.recommended_action = "click"
+                ctx.action_params = {"selector": "button.load-more"}
+            else:
+                ctx.recommended_action = "continue"
+        elif ctx.recommended_action in ("scroll", "click", "input", "wait"):
+            # After executing an interaction, observe again
+            ctx.recommended_action = "continue"
+        else:
+            ctx.recommended_action = "continue"
+        return ctx
+    
+    # SUPERVISED mode: agent reviews at page completion
+    if ctx.phase.name == "COMPLETED":
+        # Filter links: only follow dashboard-related pages
+        dashboard_links = [l for l in ctx.discovered_links if "dashboard" in l or "admin" in l]
+        if dashboard_links:
+            ctx.action_params["filter"] = dashboard_links
+        ctx.recommended_action = "continue"
+        return ctx
+    
+    ctx.recommended_action = "continue"
+    return ctx
 
 async def agent_workflow():
-    # Agent-in-the-Loop 克隆
+    # Hybrid-mode: start supervised, agent can switch to stepped dynamically
     async with AgentOrchestrator(
         start_url="https://example.com",
         output_dir="./cloned",
         max_depth=2,
+        agent_mode="supervised",   # "supervised" or "stepped"
+        decision_callback=smart_agent_callback,
     ) as orch:
         async for ctx in orch.run_dfs():
-            # Agent 在每个决策点介入
-            if ctx.obstacle.name == "LOGIN_REQUIRED":
-                print(f"登录页 detected: {ctx.snapshot.title}")
-                ctx.recommended_action = "manual"  # 等待用户登录
-            else:
-                ctx.recommended_action = "continue"
+            # Generator yields at every checkpoint (mode-dependent)
+            # In SUPERVISED: only at obstacles and page completion
+            # In STEPPED: at every atomic action (navigate, analyze, scroll, click, etc.)
+            pass
         print(orch.get_summary())
 
 asyncio.run(agent_workflow())
