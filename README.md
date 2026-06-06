@@ -28,7 +28,7 @@ python -m weblica compare <TARGET_URL> -d ./cloned -o ./comparison
 
 **关键输出目录：**
 - `./cloned/` — 克隆结果（HTML + assets）
-- `./cloned/analysis_1.json` — 页面分析报告（框架、API、资源列表、**网络流量**）
+- `./cloned/analysis/page_001/` — 页面分析报告目录（按种类拆分的 JSON 文件）
 - `./cloned/weblica-manifest.json` — 克隆元数据（页面数、资源数）
 - `./cloned/weblica-session.json` — **完整网络会话记录**（所有请求/响应、操作链、API 汇总）
 - `./cloned/.weblica-state.json` — 断点续传状态文件
@@ -171,7 +171,15 @@ cloned/
 │   ├── js/                    # 脚本
 │   ├── images/                # 图片
 │   └── fonts/                 # 字体
-├── analysis_1.json            # 智能分析报告
+├── analysis/
+│   └── page_001/              # 页面分析目录（按种类拆分）
+│       ├── index.json         # 概览：URL、资源计数、文件清单
+│       ├── metadata.json      # 标题、描述、Meta 标签、框架检测
+│       ├── dom.json           # HTML 结构、正文文本
+│       ├── assets.json        # CSS、JS、图片、字体
+│       ├── links.json         # 外链与内链
+│       ├── forms.json         # 表单、按钮
+│       └── network.json       # 网络流量、API 调用（可能最大）
 ├── weblica-manifest.json      # 克隆清单
 ├── weblica-index.html         # 索引浏览页
 └── .weblica-state.json        # 断点续传状态
@@ -404,24 +412,41 @@ weblica/
 
 ## 输出文件格式
 
-### `analysis_N.json`
+### `analysis/page_NNN/` 目录结构
+
+每个克隆的页面都会生成一个独立目录，分析数据按种类拆分为多个小文件：
+
+```
+analysis/
+└── page_001/
+    ├── index.json      # 概览：URL、各类资源计数、文件清单
+    ├── metadata.json   # 标题、描述、Meta 标签、检测到的前端框架
+    ├── dom.json        # HTML DOM 结构、正文文本
+    ├── assets.json     # CSS、JS、图片、字体资源列表
+    ├── links.json      # 页面内所有链接
+    ├── forms.json      # 表单和按钮
+    └── network.json    # 完整网络流量、API 调用记录（通常最大）
+```
+
+**`index.json` 示例：**
 
 ```json
 {
+  "page_index": 1,
   "url": "https://example.com",
   "title": "Example Domain",
-  "description": "...",
-  "frameworks": [
-    {"name": "React", "version": "18.2.0", "confidence": 0.9}
-  ],
-  "api_endpoints": [
-    {"url": "/api/v1/users", "method": "GET"}
-  ],
-  "scripts": [
-    {"url": "https://cdn.example.com/app.js", "type": "script"}
-  ],
-  "forms": [...],
-  "links": [...]
+  "assets_count": 12,
+  "links_count": 8,
+  "forms_count": 2,
+  "api_calls_count": 15,
+  "files": {
+    "metadata": "metadata.json",
+    "dom": "dom.json",
+    "assets": "assets.json",
+    "links": "links.json",
+    "forms": "forms.json",
+    "network": "network.json"
+  }
 }
 ```
 

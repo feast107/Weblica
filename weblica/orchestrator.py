@@ -490,10 +490,94 @@ class AgentOrchestrator:
                 for api in op.api_calls
             ]
             
-            analysis_path = self.output_dir / f"analysis_{len(self.state.visited_urls)}.json"
-            analysis_path.write_text(json.dumps(analysis_data, indent=2, ensure_ascii=False), encoding="utf-8")
+            # Save as split files under analysis/page_NNN/ directory
+            page_idx = len(self.state.visited_urls)
+            analysis_dir = self.output_dir / "analysis" / f"page_{page_idx:03d}"
+            analysis_dir.mkdir(parents=True, exist_ok=True)
             
-            print(f"    [OK] Completed: {page_filename} | Assets: {ctx.discovered_assets} | Links: {len(ctx.discovered_links)} | APIs: {api_count}")
+            # 1. metadata.json — small, high-level info
+            metadata = {
+                "url": analysis_data.get("url"),
+                "title": analysis_data.get("title"),
+                "description": analysis_data.get("description"),
+                "meta_tags": analysis_data.get("meta_tags", []),
+                "favicon": analysis_data.get("favicon"),
+                "frameworks": analysis_data.get("frameworks", []),
+            }
+            (analysis_dir / "metadata.json").write_text(
+                json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            
+            # 2. dom.json — HTML structure + body text (can be large)
+            dom = {
+                "html_structure": analysis_data.get("html_structure", {}),
+                "body_text": analysis_data.get("body_text", ""),
+            }
+            (analysis_dir / "dom.json").write_text(
+                json.dumps(dom, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            
+            # 3. assets.json — stylesheets, scripts, images, fonts
+            assets = {
+                "stylesheets": analysis_data.get("stylesheets", []),
+                "scripts": analysis_data.get("scripts", []),
+                "images": analysis_data.get("images", []),
+                "fonts": analysis_data.get("fonts", []),
+            }
+            (analysis_dir / "assets.json").write_text(
+                json.dumps(assets, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            
+            # 4. links.json — discovered links
+            links_data = {
+                "links": analysis_data.get("links", []),
+            }
+            (analysis_dir / "links.json").write_text(
+                json.dumps(links_data, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            
+            # 5. forms.json — forms + buttons
+            forms_data = {
+                "forms": analysis_data.get("forms", []),
+                "buttons": analysis_data.get("buttons", []),
+            }
+            (analysis_dir / "forms.json").write_text(
+                json.dumps(forms_data, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            
+            # 6. network.json — API calls + operations (can be very large)
+            network_data = {
+                "api_endpoints": analysis_data.get("api_endpoints", []),
+                "api_summary": analysis_data.get("api_summary", []),
+                "network_operations": analysis_data.get("network_operations", []),
+            }
+            (analysis_dir / "network.json").write_text(
+                json.dumps(network_data, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            
+            # Also save a compact index.json for quick overview
+            index = {
+                "page_index": page_idx,
+                "url": analysis_data.get("url"),
+                "title": analysis_data.get("title"),
+                "assets_count": len(analysis_data.get("stylesheets", [])) + len(analysis_data.get("scripts", [])) + len(analysis_data.get("images", [])) + len(analysis_data.get("fonts", [])),
+                "links_count": len(analysis_data.get("links", [])),
+                "forms_count": len(analysis_data.get("forms", [])),
+                "api_calls_count": len(analysis_data.get("api_summary", [])),
+                "files": {
+                    "metadata": "metadata.json",
+                    "dom": "dom.json",
+                    "assets": "assets.json",
+                    "links": "links.json",
+                    "forms": "forms.json",
+                    "network": "network.json",
+                },
+            }
+            (analysis_dir / "index.json").write_text(
+                json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            
+            print(f"    [OK] Completed: {page_filename} | Assets: {ctx.discovered_assets} | Links: {len(ctx.discovered_links)} | APIs: {api_count} | Analysis: analysis/page_{page_idx:03d}/")
             
         except Exception as e:
             print(f"    [ERR] Phase2 failed for {url}: {e}")
