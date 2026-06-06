@@ -48,7 +48,9 @@ class CapturedResponse:
     status: int
     status_text: str = ""
     headers: Dict[str, str] = field(default_factory=dict)
-    body_preview: Optional[str] = None
+    body: Optional[str] = None          # Full response body (text only, size-limited)
+    body_preview: Optional[str] = None  # Truncated preview
+    body_truncated: bool = False        # True if body exceeded max size
     content_type: Optional[str] = None
     timestamp: float = 0.0
     
@@ -57,7 +59,9 @@ class CapturedResponse:
             "status": self.status,
             "status_text": self.status_text,
             "headers": self.headers,
+            "body": self.body,
             "body_preview": self.body_preview,
+            "body_truncated": self.body_truncated,
             "content_type": self.content_type,
             "timestamp": self.timestamp,
         }
@@ -84,11 +88,14 @@ class PageState:
     url: str
     title: str = ""
     body_text_preview: str = ""
+    dom_html: Optional[str] = None  # body.innerHTML snapshot (size-limited)
     timestamp: float = 0.0
     
+    DOM_PREVIEW_MAX: int = 10000  # Max chars for DOM snapshot
+    
     @staticmethod
-    async def capture(page: Page) -> "PageState":
-        """Capture current page state."""
+    async def capture(page: Page, max_dom_size: int = 10000) -> "PageState":
+        """Capture current page state including DOM snapshot."""
         try:
             title = await page.title()
         except Exception:
@@ -98,10 +105,15 @@ class PageState:
             body_preview = body_text[:500] if body_text else ""
         except Exception:
             body_preview = ""
+        try:
+            dom = await page.evaluate(f"() => document.body.innerHTML.substring(0, {max_dom_size})")
+        except Exception:
+            dom = None
         return PageState(
             url=page.url,
             title=title,
             body_text_preview=body_preview,
+            dom_html=dom,
             timestamp=time.time(),
         )
     
@@ -110,6 +122,7 @@ class PageState:
             "url": self.url,
             "title": self.title,
             "body_text_preview": self.body_text_preview,
+            "dom_html": self.dom_html,
             "timestamp": self.timestamp,
         }
 
@@ -183,9 +196,10 @@ class NetworkInterceptor:
         traffic = interceptor.stop_and_collect()
     """
     
-    def __init__(self, page: Page, max_body_preview: int = 2000):
+    def __init__(self, page: Page, max_body_preview: int = 2000, max_body_size: int = 500_000):
         self.page = page
         self.max_body_preview = max_body_preview
+        self.max_body_size = max_body_size  # Max bytes for full body capture
         
         # In-flight requests awaiting responses
         self._pending: Dict[str, CapturedRequest] = {}
@@ -293,15 +307,29 @@ class NetworkInterceptor:
             
             content_type = resp_headers.get("content-type", "")
             
-            # Try to capture body preview for API-like responses
+            # Try to capture full body for text-based responses
+            body = None
             body_preview = None
-            if content_type and any(ct in content_type for ct in ["json", "javascript", "text", "xml"]):
+            body_truncated = False
+            
+            is_text_type = content_type and any(
+                ct in content_type.lower() 
+                for ct in ["json", "javascript", "text", "xml", "html", "csv"]
+            )
+            
+            if is_text_type:
                 try:
-                    body = await response.body()
-                    text = body.decode("utf-8", errors="replace")
-                    body_preview = text[:self.max_body_preview]
-                    if len(text) > self.max_body_preview:
-                        body_preview += f"\n... ({len(text)} bytes total)"
+                    raw_body = await response.body()
+                    if len(raw_body) <= self.max_body_size:
+                        body = raw_body.decode("utf-8", errors="replace")
+                    else:
+                        body = raw_body[:self.max_body_size].decode("utf-8", errors="replace")
+                        body_truncated = True
+                    
+                    # Build preview
+                    body_preview = body[:self.max_body_preview] if body else None
+                    if body and len(body) > self.max_body_preview:
+                        body_preview += f"\n... ({len(body)} chars total)"
                 except Exception:
                     pass
             
@@ -309,7 +337,9 @@ class NetworkInterceptor:
                 status=response.status,
                 status_text=response.status_text,
                 headers=resp_headers,
+                body=body,
                 body_preview=body_preview,
+                body_truncated=body_truncated,
                 content_type=content_type,
                 timestamp=time.time(),
             )

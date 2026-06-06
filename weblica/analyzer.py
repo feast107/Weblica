@@ -77,7 +77,10 @@ class PageAnalysis:
     # Interactive elements
     forms: List[Dict[str, Any]] = field(default_factory=list)
     links: List[str] = field(default_factory=list)
+    links_detailed: List[Dict[str, Any]] = field(default_factory=list)
     buttons: List[str] = field(default_factory=list)
+    buttons_detailed: List[Dict[str, Any]] = field(default_factory=list)
+    interactive_elements: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class SmartAnalyzer:
@@ -143,7 +146,10 @@ class SmartAnalyzer:
         # Extract interactive elements
         analysis.forms = await self._extract_forms(page)
         analysis.links = await self._extract_links(page, url)
+        analysis.links_detailed = await self._extract_links_detailed(page, url)
         analysis.buttons = await self._extract_buttons(page)
+        analysis.buttons_detailed = await self._extract_buttons_detailed(page)
+        analysis.interactive_elements = await self._extract_interactive_elements(page)
         
         # Extract API endpoints from scripts and page data
         analysis.api_endpoints = await self._extract_api_endpoints(page, analysis.scripts)
@@ -319,6 +325,107 @@ class SmartAnalyzer:
             () => Array.from(document.querySelectorAll('button, [role="button"], input[type="submit"]'))
                 .map(btn => btn.textContent.trim() || btn.value)
                 .filter(Boolean)
+        """)
+
+    async def _extract_buttons_detailed(self, page: Page) -> List[Dict[str, Any]]:
+        """Extract detailed button info: selector, text, tag, classes, onclick, href."""
+        return await page.evaluate("""
+            () => {
+                const getSelector = (el) => {
+                    if (el.id) return '#' + el.id;
+                    const tag = el.tagName.toLowerCase();
+                    const cls = Array.from(el.classList).slice(0, 3).join('.');
+                    const txt = el.textContent.trim().substring(0, 30);
+                    return cls ? tag + '.' + cls : tag + (txt ? `[title="${txt}"]` : '');
+                };
+                return Array.from(document.querySelectorAll('button, [role="button"], input[type="submit"], a.btn, a[class*="btn"]'))
+                    .map((btn, idx) => ({
+                        index: idx,
+                        text: (btn.textContent.trim() || btn.value || '').substring(0, 100),
+                        tag: btn.tagName.toLowerCase(),
+                        selector: getSelector(btn),
+                        id: btn.id || null,
+                        class: btn.className || null,
+                        href: btn.href || null,
+                        onclick: btn.getAttribute('onclick') || null,
+                        type: btn.type || null,
+                        disabled: btn.disabled || false,
+                    }))
+                    .filter(b => b.text)
+            }
+        """)
+
+    async def _extract_links_detailed(self, page: Page, base_url: str) -> List[Dict[str, Any]]:
+        """Extract detailed link info: url, text, selector, title."""
+        raw = await page.evaluate("""
+            () => {
+                const getSelector = (el) => {
+                    if (el.id) return '#' + el.id;
+                    const tag = el.tagName.toLowerCase();
+                    const cls = Array.from(el.classList).slice(0, 3).join('.');
+                    return cls ? tag + '.' + cls : tag;
+                };
+                return Array.from(document.querySelectorAll('a[href]')).map((a, idx) => ({
+                    index: idx,
+                    url: a.href,
+                    text: (a.textContent.trim() || a.title || '').substring(0, 100),
+                    selector: getSelector(a),
+                    id: a.id || null,
+                    class: a.className || null,
+                    title: a.title || null,
+                    target: a.target || null,
+                }));
+            }
+        """)
+        base_domain = urlparse(base_url).netloc
+        DANGEROUS_PATHS = ['logout', 'signout', 'exit', 'quit', 'sign-out', 'log-out']
+        DANGEROUS_QUERIES = ['action=logout', 'action=signout', 'logout=true', 'signout=true']
+        safe = []
+        for link in raw:
+            url = link.get("url", "")
+            if not url.startswith("http"):
+                continue
+            if urlparse(url).netloc != base_domain:
+                continue
+            lower = url.lower()
+            path = urlparse(url).path.lower()
+            query = urlparse(url).query.lower()
+            if any(d in path for d in DANGEROUS_PATHS):
+                continue
+            if any(d in query for d in DANGEROUS_QUERIES):
+                continue
+            safe.append(link)
+        return safe
+
+    async def _extract_interactive_elements(self, page: Page) -> List[Dict[str, Any]]:
+        """Extract all interactive elements: inputs, selects, textareas, toggles."""
+        return await page.evaluate("""
+            () => {
+                const getSelector = (el) => {
+                    if (el.id) return '#' + el.id;
+                    if (el.name) return el.tagName.toLowerCase() + '[name="' + el.name + '"]';
+                    const cls = Array.from(el.classList).slice(0, 2).join('.');
+                    return cls ? el.tagName.toLowerCase() + '.' + cls : el.tagName.toLowerCase();
+                };
+                const elements = [];
+                // Inputs
+                document.querySelectorAll('input:not([type="hidden"]), textarea, select').forEach((el, idx) => {
+                    elements.push({
+                        index: idx,
+                        type: el.type || el.tagName.toLowerCase(),
+                        tag: el.tagName.toLowerCase(),
+                        selector: getSelector(el),
+                        id: el.id || null,
+                        name: el.name || null,
+                        placeholder: el.placeholder || null,
+                        value: el.value ? String(el.value).substring(0, 100) : null,
+                        required: el.required || false,
+                        disabled: el.disabled || false,
+                        label: (document.querySelector('label[for="' + el.id + '"]')?.textContent.trim() || '').substring(0, 50),
+                    });
+                });
+                return elements;
+            }
         """)
 
     async def _extract_api_endpoints(self, page: Page, scripts: List[AssetInfo]) -> List[APIEndpoint]:

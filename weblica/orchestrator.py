@@ -642,7 +642,7 @@ class AgentOrchestrator:
                             continue
                     
                     # ---- 2.5 Save analysis split ----
-                    await self._save_analysis_split(url, depth, analysis, page_idx)
+                    await self._save_analysis_split(url, depth, parent, analysis, page_idx)
                     
                     self.state.completed_urls.append(url)
                     ctx.phase = ClonePhase.COMPLETED
@@ -795,7 +795,7 @@ class AgentOrchestrator:
         
         return ctx
 
-    async def _save_analysis_split(self, url: str, depth: int, analysis: PageAnalysis, page_idx: int):
+    async def _save_analysis_split(self, url: str, depth: int, parent_url: Optional[str], analysis: PageAnalysis, page_idx: int):
         """Save analysis as split files under analysis/page_NNN/ directory."""
         # Build full analysis data with network traffic included
         analysis_data = json.loads(self.analyzer.export_json(analysis))
@@ -803,18 +803,33 @@ class AgentOrchestrator:
             op.to_dict() for op in self.recorder.operations
             if op.page_url == url
         ]
-        analysis_data["api_summary"] = [
-            {
-                "url": api.request.url,
-                "method": api.request.method,
-                "status": api.response.status if api.response else None,
-                "resource_type": api.request.resource_type,
-                "duration_ms": api.duration_ms,
-            }
-            for op in self.recorder.operations
-            if op.page_url == url
-            for api in op.api_calls
-        ]
+        # Build detailed API summary with full request/response bodies
+        api_summary = []
+        for op in self.recorder.operations:
+            if op.page_url != url:
+                continue
+            for api in op.api_calls:
+                resp = api.response
+                entry = {
+                    "url": api.request.url,
+                    "method": api.request.method,
+                    "status": resp.status if resp else None,
+                    "status_text": resp.status_text if resp else None,
+                    "resource_type": api.request.resource_type,
+                    "content_type": resp.content_type if resp else None,
+                    "duration_ms": api.duration_ms,
+                    "request": {
+                        "headers": api.request.headers,
+                        "post_data": api.request.post_data,
+                    },
+                    "response": {
+                        "body": resp.body if resp else None,
+                        "body_truncated": resp.body_truncated if resp else False,
+                        "headers": resp.headers if resp else {},
+                    } if resp else None,
+                }
+                api_summary.append(entry)
+        analysis_data["api_summary"] = api_summary
         
         analysis_dir = self.output_dir / "analysis" / f"page_{page_idx:03d}"
         analysis_dir.mkdir(parents=True, exist_ok=True)
@@ -856,13 +871,21 @@ class AgentOrchestrator:
             json.dumps(links_data, indent=2, ensure_ascii=False), encoding="utf-8"
         )
         
-        # 5. forms.json
-        forms_data = {
+        # 5. interactions.json (enhanced interactive elements)
+        interactions_data = {
             "forms": analysis_data.get("forms", []),
             "buttons": analysis_data.get("buttons", []),
+            "buttons_detailed": analysis_data.get("buttons_detailed", []),
+            "links_detailed": analysis_data.get("links_detailed", []),
+            "interactive_elements": analysis_data.get("interactive_elements", []),
         }
+        (analysis_dir / "interactions.json").write_text(
+            json.dumps(interactions_data, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        # Backward-compat: also write forms.json
         (analysis_dir / "forms.json").write_text(
-            json.dumps(forms_data, indent=2, ensure_ascii=False), encoding="utf-8"
+            json.dumps({"forms": interactions_data["forms"], "buttons": interactions_data["buttons"]}, 
+                      indent=2, ensure_ascii=False), encoding="utf-8"
         )
         
         # 6. network.json
@@ -875,11 +898,40 @@ class AgentOrchestrator:
             json.dumps(network_data, indent=2, ensure_ascii=False), encoding="utf-8"
         )
         
+        # 7. snapshots.json — DOM before/after for interactive operations
+        snapshots = []
+        for op in self.recorder.operations:
+            if op.page_url == url and (op.before_state or op.after_state):
+                snapshots.append({
+                    "operation_id": op.operation_id,
+                    "action": op.action,
+                    "target": op.target,
+                    "before": {
+                        "url": op.before_state.url if op.before_state else None,
+                        "title": op.before_state.title if op.before_state else None,
+                        "dom_html": op.before_state.dom_html if op.before_state else None,
+                        "timestamp": op.before_state.timestamp if op.before_state else None,
+                    },
+                    "after": {
+                        "url": op.after_state.url if op.after_state else None,
+                        "title": op.after_state.title if op.after_state else None,
+                        "dom_html": op.after_state.dom_html if op.after_state else None,
+                        "timestamp": op.after_state.timestamp if op.after_state else None,
+                    },
+                    "interactions_count": len(op.interactions),
+                })
+        if snapshots:
+            (analysis_dir / "snapshots.json").write_text(
+                json.dumps(snapshots, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        
         # index.json
         index = {
             "page_index": page_idx,
             "url": analysis_data.get("url"),
             "title": analysis_data.get("title"),
+            "depth": depth,
+            "parent_url": parent_url,
             "assets_count": (
                 len(analysis_data.get("stylesheets", [])) +
                 len(analysis_data.get("scripts", [])) +
@@ -895,7 +947,9 @@ class AgentOrchestrator:
                 "assets": "assets.json",
                 "links": "links.json",
                 "forms": "forms.json",
+                "interactions": "interactions.json",
                 "network": "network.json",
+                "snapshots": "snapshots.json",
             },
         }
         (analysis_dir / "index.json").write_text(
@@ -949,8 +1003,14 @@ class AgentOrchestrator:
                     else:
                         click_interactions_before = []
                     
+                    # Capture pre-click DOM state
+                    before_state = await PageState.capture(page)
+                    
                     await page.click(selector)
                     await asyncio.sleep(2)  # Wait for API response
+                    
+                    # Capture post-click DOM state
+                    after_state = await PageState.capture(page)
                     
                     # Record post-click traffic
                     click_interactions = []
@@ -965,6 +1025,8 @@ class AgentOrchestrator:
                         depth=depth,
                         action="click",
                         target=selector,
+                        before_state=before_state,
+                        after_state=after_state,
                         interactions=click_interactions,
                     )
                     self.recorder.operations.append(click_op)
@@ -1111,6 +1173,62 @@ class AgentOrchestrator:
             self.auth_manager.config.session_storage.update(params.get("session_storage", {}))
             print(f"[ORCH] Applied storage auth")
 
+    async def _generate_navigation(self):
+        """Generate navigation.json — a tree of all cloned pages with parent/child relationships."""
+        pages = []
+        analysis_dir = self.output_dir / "analysis"
+        if not analysis_dir.exists():
+            return
+        
+        for page_dir in sorted(analysis_dir.iterdir()):
+            if not page_dir.is_dir() or not page_dir.name.startswith("page_"):
+                continue
+            index_file = page_dir / "index.json"
+            if not index_file.exists():
+                continue
+            try:
+                data = json.loads(index_file.read_text(encoding="utf-8"))
+                pages.append({
+                    "page_index": data.get("page_index"),
+                    "url": data.get("url"),
+                    "title": data.get("title"),
+                    "depth": data.get("depth", 0),
+                    "parent_url": data.get("parent_url"),
+                    "analysis_dir": page_dir.name,
+                })
+            except Exception:
+                continue
+        
+        # Build tree structure
+        url_to_page = {p["url"]: p for p in pages}
+        tree = {"root": [], "by_parent": {}, "by_depth": {}}
+        
+        for p in pages:
+            depth = p["depth"]
+            parent = p["parent_url"]
+            
+            if depth not in tree["by_depth"]:
+                tree["by_depth"][depth] = []
+            tree["by_depth"][depth].append(p["url"])
+            
+            if parent and parent in url_to_page:
+                if parent not in tree["by_parent"]:
+                    tree["by_parent"][parent] = []
+                tree["by_parent"][parent].append(p["url"])
+            elif not parent:
+                tree["root"].append(p["url"])
+        
+        nav = {
+            "pages": pages,
+            "tree": tree,
+            "total_pages": len(pages),
+            "max_depth": max((p["depth"] for p in pages), default=0),
+        }
+        
+        nav_path = self.output_dir / "navigation.json"
+        nav_path.write_text(json.dumps(nav, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"[ORCH] Navigation map: {nav_path}")
+
     async def _finalize(self):
         """Generate manifest, index, and network session report."""
         manifest = {
@@ -1136,6 +1254,7 @@ class AgentOrchestrator:
             print(f"[ORCH] Captured {len(api_summary)} API calls total")
             print(f"[ORCH] Session report: {session_path}")
         
+        await self._generate_navigation()
         await self.cloner._generate_index_html()
         print(f"[ORCH] DFS clone complete. Visited: {len(self.state.visited_urls)}, Completed: {len(self.state.completed_urls)}, Blocked: {len(self.state.blocked_urls)}, Skipped: {len(self.state.skipped_urls)}")
 

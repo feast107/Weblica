@@ -97,21 +97,25 @@ python -m weblica clone <URL> [OPTIONS]
 ```
 <output_dir>/
 ├── index.html                 # Main page (renamed from path)
-├── <other_pages>.html         # Crawled sub-pages
-├── assets/
-│   ├── css/                   # Downloaded stylesheets
-│   ├── js/                    # Downloaded scripts
-│   ├── images/                # Downloaded images
-│   └── fonts/                 # Downloaded fonts
-├── analysis/                  # Split analysis files per page
+├── <other_pages>.html         # Crawled sub-pages (static snapshots with local asset paths)
+├── assets/                    # Downloaded and rewritten frontend assets
+│   ├── css/                   # Stylesheets
+│   ├── js/                    # Scripts
+│   ├── images/                # Images
+│   ├── fonts/                 # Fonts
+│   └── api/                   # Captured API response samples
+├── analysis/                  # Per-page deep analysis
 │   └── page_001/
-│       ├── index.json         # Overview: URL, asset/link/form counts, file manifest
+│       ├── index.json         # Overview: URL, title, depth, parent_url, file manifest
 │       ├── metadata.json      # Title, description, meta tags, detected frameworks
-│       ├── dom.json           # HTML structure + body text
-│       ├── assets.json        # CSS, JS, images, fonts
+│       ├── dom.html           # Full page HTML (open directly in browser)
+│       ├── assets.json        # CSS, JS, images, fonts referenced by this page
 │       ├── links.json         # Discovered internal links
-│       ├── forms.json         # Forms and buttons
-│       └── network.json       # Full network traffic + API calls (largest file)
+│       ├── forms.json         # Forms and buttons (backward-compatible)
+│       ├── interactions.json  # Enhanced interactive elements: buttons/links/inputs with selectors, events, hrefs
+│       ├── network.json       # Full network traffic + API calls with COMPLETE request/response bodies
+│       └── snapshots.json     # DOM before/after for interactive operations (click, scroll, etc.)
+├── navigation.json            # Site-wide page tree: parent→children, depth groups
 ├── weblica-manifest.json      # Clone metadata
 ├── weblica-session.json       # Complete session recording (all operations + traffic)
 ├── weblica-index.html         # Browsable index page
@@ -248,11 +252,11 @@ async def workflow():
 - `async new_page() -> Page` — Get a stealth-initialized Playwright page
 - `async mimic_human_behavior(page)` — Random scroll + mouse movement
 
-**`NetworkInterceptor`** — Dynamic HTTP traffic capture (NEW)
+**`NetworkInterceptor`** — Dynamic HTTP traffic capture
 - Attach to a Playwright `Page`: `interceptor = NetworkInterceptor(page)`
 - `start()` / `stop()` — Begin/end listening
 - `stop_and_collect() -> List[NetworkInteraction]` — Get all request/response pairs
-- Captures XHR/fetch/document/script requests with headers, postData, and response body previews
+- Captures XHR/fetch/document/script requests with headers, postData, and **complete response bodies** (up to 500KB, text types only)
 - Auto-triggers interactions (scroll, click "load more") to capture lazy-loaded APIs
 
 **`SessionRecorder`** — Session operation chain recorder (NEW)
@@ -294,16 +298,24 @@ import json
 with open("cloned/weblica-session.json") as f:
     session = json.load(f)
 
-# Print all API calls
+# Print all API calls with response bodies
 for api in session["api_summary"]:
     print(f"{api['method']} {api['url']} -> {api['status']}")
+    if api.get('response', {}).get('body'):
+        body = api['response']['body']
+        print(f"  Response ({len(body)} chars): {body[:300]}...")
 
 # Print operations with their before/after page states
 for op in session["operations"]:
     print(f"Action: {op['action']} on {op['page_url']}")
-    print(f"  Before: {op['before_state']['url']} | {op['before_state']['title']}")
-    print(f"  After:  {op['after_state']['url']} | {op['after_state']['title']}")
+    if op.get('before_state'):
+        print(f"  Before: {op['before_state']['url']} | {op['before_state']['title']}")
+        print(f"  DOM changed: {op['before_state']['dom_html'] != op['after_state']['dom_html'] if op.get('after_state') else 'unknown'}")
     print(f"  APIs captured: {len(op['api_calls'])}")
+    for api in op['api_calls'][:3]:
+        print(f"    {api['request']['method']} {api['request']['url'][:60]}")
+        if api.get('response', {}).get('body'):
+            print(f"    Response body preview: {api['response']['body'][:200]}...")
 ```
 
 ### Workflow E: Human-in-the-Loop Authenticated Clone (NEW)
@@ -357,10 +369,13 @@ Use when user wants to understand site architecture.
 
 ```
 1. python -m weblica clone <URL> -o ./cloned --depth 2 --agent-mode
-2. Read analysis/page_001/index.json for overview
-3. Read analysis/page_001/metadata.json for frameworks
-4. Read analysis/page_001/network.json for API endpoints and traffic
-5. Read weblica-manifest.json for asset inventory
+2. Read navigation.json for site structure and page hierarchy
+3. Read analysis/page_001/index.json for overview (note parent_url, depth)
+4. Read analysis/page_001/metadata.json for frameworks
+5. Read analysis/page_001/network.json for API endpoints and traffic (includes response bodies)
+6. Read analysis/page_001/interactions.json for buttons, links, forms with selectors
+7. Read analysis/page_001/snapshots.json for DOM changes after interactions
+8. Read weblica-manifest.json for asset inventory
 ```
 
 ### Workflow C: Interaction Recording → Replay on Clone
@@ -451,28 +466,49 @@ When in STEPPED mode, the agent can instruct these atomic operations at checkpoi
 
 Each cloned page gets its own directory with split category files:
 
-**`index.json`** — Quick overview
-- `page_index`, `url`, `title`, `assets_count`, `links_count`, `forms_count`, `api_calls_count`
+**`index.json`** — Quick overview + navigation context
+- `page_index`, `url`, `title`, `depth` (DFS depth), `parent_url` (where this page was discovered from)
+- `assets_count`, `links_count`, `forms_count`, `api_calls_count`
 - `files` — manifest pointing to other files in the directory
 
 **`metadata.json`** — High-level page info
 - `url`, `title`, `description`, `meta_tags`, `favicon`, `frameworks`
 
-**`dom.json`** — DOM and text content
-- `html_structure`, `body_text`
+**`dom.html`** — Complete page HTML (open directly in browser)
+- Full `document.documentElement.outerHTML` snapshot at clone time
+- Use this to understand the visual structure and extract templates
 
 **`assets.json`** — Asset inventory
 - `stylesheets`, `scripts`, `images`, `fonts`
 
-**`links.json`** — Discovered internal links
+**`links.json`** — Discovered internal links (URL strings)
 
-**`forms.json`** — Interactive elements
-- `forms`, `buttons`
+**`forms.json`** — Interactive elements (backward-compatible)
+- `forms`, `buttons` (text-only list)
 
-**`network.json`** — Network traffic (largest file)
+**`interactions.json`** — Enhanced interactive elements (NEW)
+- `buttons_detailed` — Each button with `selector`, `text`, `tag`, `href`, `onclick`, `class`, `id`
+- `links_detailed` — Each link with `selector`, `text`, `url`, `title`, `class`, `id`, `target`
+- `interactive_elements` — Inputs, textareas, selects with `selector`, `type`, `name`, `placeholder`, `value`, `label`, `required`
+- Use this to reverse-engineer click handlers, navigation targets, and form structures
+
+**`network.json`** — Network traffic with FULL response bodies (NEW)
 - `api_endpoints` — Discovered API patterns
-- `api_summary` — Flat list of all API calls
-- `network_operations` — Full request/response chain with headers and body previews
+- `api_summary` — Detailed API calls with complete `request.headers`, `request.post_data`, `response.body`, `response.body_truncated`
+- `network_operations` — Full operation chains (navigate → click → wait) with before/after states and all traffic
+- **Agent tip:** Read `api_summary` to understand backend data structures without reverse-engineering minified JS
+
+**`snapshots.json`** — DOM before/after for interactions (NEW)
+- Records `body.innerHTML` before and after auto-triggered interactions (scroll, click "load more")
+- Each entry: `operation_id`, `action`, `target` (selector), `before.dom_html`, `after.dom_html`
+- Use this to see what content JS dynamically injects into the page
+
+### `navigation.json` (root directory) — Site-wide page tree (NEW)
+- `pages` — Flat list of all pages with `page_index`, `url`, `title`, `depth`, `parent_url`
+- `tree.by_parent` — Map of parent URL → list of child URLs
+- `tree.by_depth` — Map of depth level → list of URLs at that level
+- `tree.root` — List of entry-point URLs (no parent)
+- Use this to reconstruct the site's routing hierarchy and navigation flow
 
 ### `weblica-manifest.json`
 
