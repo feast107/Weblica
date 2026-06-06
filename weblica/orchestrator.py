@@ -33,6 +33,7 @@ from .browser import CloakBrowser
 from .analyzer import SmartAnalyzer, PageAnalysis
 from .auth import AuthManager, AuthConfig
 from .cloner import WebCloner
+from .interceptor import NetworkInterceptor, SessionRecorder, PageOperation
 
 
 class ClonePhase(Enum):
@@ -158,9 +159,13 @@ class AgentOrchestrator:
         self.cloner: Optional[WebCloner] = None
         self.state: Optional[CloneState] = None
         self.analyzer = SmartAnalyzer()
+        self.recorder = SessionRecorder()
         
         # The currently open page (kept alive during agent decisions)
         self._active_page: Optional[Page] = None
+        
+        # Network interceptor for the current page
+        self._interceptor: Optional[NetworkInterceptor] = None
 
     async def __aenter__(self):
         self.cloner = WebCloner(
@@ -181,6 +186,9 @@ class AgentOrchestrator:
 
     async def _close_active_page(self):
         """Safely close the active page if one exists."""
+        if self._interceptor:
+            self._interceptor.stop()
+            self._interceptor = None
         if self._active_page:
             try:
                 await self._active_page.close()
@@ -345,6 +353,10 @@ class AgentOrchestrator:
         page = await self.cloner.browser.new_page()
         self._active_page = page
         
+        # Start network interceptor immediately to capture all traffic
+        self._interceptor = NetworkInterceptor(page)
+        self._interceptor.start()
+        
         try:
             # Auth injection
             if self.auth_manager and depth == 0 and len(self.state.visited_urls) == 1:
@@ -413,6 +425,7 @@ class AgentOrchestrator:
     async def _process_page_phase2(self, url: str, depth: int, ctx: DecisionContext, page: Page) -> DecisionContext:
         """
         Phase 2: Analyze page structure, download assets, persist HTML.
+        Captures all network traffic during navigation and optional auto-interactions.
         Only called when no obstacles are present (or obstacles were cleared).
         """
         try:
@@ -421,6 +434,33 @@ class AgentOrchestrator:
             ctx.full_analysis = analysis
             ctx.discovered_links = analysis.links[:20]
             ctx.discovered_assets = len(analysis.stylesheets) + len(analysis.scripts) + len(analysis.images) + len(analysis.fonts)
+            
+            # Record the navigation operation with captured traffic
+            nav_interactions = []
+            if self._interceptor:
+                nav_interactions = self._interceptor.stop_and_collect()
+                self._interceptor.clear()
+                self._interceptor.start()  # Restart for auto-interactions
+            
+            nav_op = PageOperation(
+                operation_id=len(self.recorder.operations) + 1,
+                page_url=url,
+                depth=depth,
+                action="navigate",
+                target=url,
+                interactions=nav_interactions,
+            )
+            self.recorder.operations.append(nav_op)
+            
+            api_count = len(nav_op.api_calls)
+            if api_count > 0:
+                print(f"    [API] Captured {api_count} API calls during navigation")
+                for api in nav_op.api_calls[:5]:
+                    status = api.response.status if api.response else "?"
+                    print(f"      {api.request.method} {api.request.url[:80]} -> {status}")
+            
+            # Optional: Auto-interact to trigger lazy-loaded content and APIs
+            await self._auto_interact(page, url, depth)
             
             ctx.phase = ClonePhase.ASSET_DOWNLOADING
             await self.cloner._download_assets(analysis, url)
@@ -431,10 +471,29 @@ class AgentOrchestrator:
             html_path = self.output_dir / page_filename
             html_path.write_text(html, encoding="utf-8")
             
-            analysis_path = self.output_dir / f"analysis_{len(self.state.visited_urls)}.json"
-            analysis_path.write_text(self.analyzer.export_json(analysis), encoding="utf-8")
+            # Build analysis with network traffic included
+            analysis_data = json.loads(self.analyzer.export_json(analysis))
+            analysis_data["network_operations"] = [
+                op.to_dict() for op in self.recorder.operations
+                if op.page_url == url
+            ]
+            analysis_data["api_summary"] = [
+                {
+                    "url": api.request.url,
+                    "method": api.request.method,
+                    "status": api.response.status if api.response else None,
+                    "resource_type": api.request.resource_type,
+                    "duration_ms": api.duration_ms,
+                }
+                for op in self.recorder.operations
+                if op.page_url == url
+                for api in op.api_calls
+            ]
             
-            print(f"    [OK] Completed: {page_filename} | Assets: {ctx.discovered_assets} | Links: {len(ctx.discovered_links)}")
+            analysis_path = self.output_dir / f"analysis_{len(self.state.visited_urls)}.json"
+            analysis_path.write_text(json.dumps(analysis_data, indent=2, ensure_ascii=False), encoding="utf-8")
+            
+            print(f"    [OK] Completed: {page_filename} | Assets: {ctx.discovered_assets} | Links: {len(ctx.discovered_links)} | APIs: {api_count}")
             
         except Exception as e:
             print(f"    [ERR] Phase2 failed for {url}: {e}")
@@ -442,6 +501,111 @@ class AgentOrchestrator:
             ctx.phase = ClonePhase.BLOCKED
         
         return ctx
+    
+    async def _auto_interact(self, page: Page, url: str, depth: int):
+        """
+        Perform automatic interactions to trigger lazy-loaded APIs.
+        E.g., scroll to bottom, click 'load more' buttons.
+        """
+        interaction_count = 0
+        
+        # Interaction 1: Scroll to bottom to trigger infinite scroll / lazy load
+        try:
+            prev_height = await page.evaluate("document.body.scrollHeight")
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await asyncio.sleep(1.5)
+            new_height = await page.evaluate("document.body.scrollHeight")
+            if new_height > prev_height:
+                interaction_count += 1
+                print(f"    [INTERACT] Scrolled, page height {prev_height} -> {new_height}")
+        except Exception:
+            pass
+        
+        # Interaction 2: Click common "load more" / "show more" buttons
+        load_more_selectors = [
+            "button:has-text('加载更多')",
+            "button:has-text('Load More')",
+            "button:has-text('查看更多')",
+            "button:has-text('Show More')",
+            "a:has-text('加载更多')",
+            "a:has-text('查看更多')",
+            ".load-more",
+            ".loadmore",
+            "[data-action='load-more']",
+            "button.btn-primary:has-text('更多')",
+        ]
+        
+        for selector in load_more_selectors:
+            try:
+                if await page.is_visible(selector, timeout=500):
+                    print(f"    [INTERACT] Clicking: {selector}")
+                    
+                    # Record pre-click state
+                    if self._interceptor:
+                        self._interceptor.stop()
+                        click_interactions_before = list(self._interceptor._interactions)
+                        self._interceptor.clear()
+                        self._interceptor.start()
+                    else:
+                        click_interactions_before = []
+                    
+                    await page.click(selector)
+                    await asyncio.sleep(2)  # Wait for API response
+                    
+                    # Record post-click traffic
+                    click_interactions = []
+                    if self._interceptor:
+                        click_interactions = self._interceptor.stop_and_collect()
+                        self._interceptor.clear()
+                        self._interceptor.start()
+                    
+                    click_op = PageOperation(
+                        operation_id=len(self.recorder.operations) + 1,
+                        page_url=url,
+                        depth=depth,
+                        action="click",
+                        target=selector,
+                        interactions=click_interactions,
+                    )
+                    self.recorder.operations.append(click_op)
+                    
+                    api_count = len(click_op.api_calls)
+                    if api_count > 0:
+                        print(f"    [API] Click triggered {api_count} API calls")
+                        for api in click_op.api_calls[:3]:
+                            status = api.response.status if api.response else "?"
+                            print(f"      {api.request.method} {api.request.url[:80]} -> {status}")
+                    
+                    interaction_count += 1
+                    break  # Only click the first matching button
+            except Exception:
+                continue
+        
+        # Interaction 3: Wait for background polling / heartbeat
+        try:
+            await asyncio.sleep(2)
+            wait_interactions = []
+            if self._interceptor:
+                wait_interactions = self._interceptor.stop_and_collect()
+                self._interceptor.clear()
+                self._interceptor.start()
+            
+            if wait_interactions:
+                wait_op = PageOperation(
+                    operation_id=len(self.recorder.operations) + 1,
+                    page_url=url,
+                    depth=depth,
+                    action="wait",
+                    interactions=wait_interactions,
+                )
+                self.recorder.operations.append(wait_op)
+        except Exception:
+            pass
+        
+        if interaction_count > 0:
+            print(f"    [INTERACT] Performed {interaction_count} auto-interactions")
+        
+        return interaction_count
 
     async def _wait_for_browser_login(self, page: Page, timeout: int = 600) -> bool:
         """
@@ -548,7 +712,7 @@ class AgentOrchestrator:
             print(f"[ORCH] Applied storage auth")
 
     async def _finalize(self):
-        """Generate manifest and index."""
+        """Generate manifest, index, and network session report."""
         manifest = {
             "cloned_at": str(asyncio.get_event_loop().time()),
             "total_pages": len(self.state.completed_urls),
@@ -561,6 +725,16 @@ class AgentOrchestrator:
         }
         manifest_path = self.output_dir / "weblica-manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+        
+        # Save network session report
+        session_path = self.output_dir / "weblica-session.json"
+        self.recorder.save(str(session_path))
+        
+        # Print API summary
+        api_summary = self.recorder.get_api_summary()
+        if api_summary:
+            print(f"[ORCH] Captured {len(api_summary)} API calls total")
+            print(f"[ORCH] Session report: {session_path}")
         
         await self.cloner._generate_index_html()
         print(f"[ORCH] DFS clone complete. Visited: {len(self.state.visited_urls)}, Completed: {len(self.state.completed_urls)}, Blocked: {len(self.state.blocked_urls)}, Skipped: {len(self.state.skipped_urls)}")

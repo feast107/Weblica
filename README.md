@@ -28,8 +28,9 @@ python -m weblica compare <TARGET_URL> -d ./cloned -o ./comparison
 
 **关键输出目录：**
 - `./cloned/` — 克隆结果（HTML + assets）
-- `./cloned/analysis_1.json` — 页面分析报告（框架、API、资源列表）
+- `./cloned/analysis_1.json` — 页面分析报告（框架、API、资源列表、**网络流量**）
 - `./cloned/weblica-manifest.json` — 克隆元数据（页面数、资源数）
+- `./cloned/weblica-session.json` — **完整网络会话记录**（所有请求/响应、操作链、API 汇总）
 - `./cloned/.weblica-state.json` — 断点续传状态文件
 - `./comparison/` — 对比截图（`original.png`, `clone.png`, `diff.png`）
 
@@ -39,6 +40,7 @@ python -m weblica compare <TARGET_URL> -d ./cloned -o ./comparison
 
 - **🕵️ 隐蔽克隆 (CloakBrowser)** — 优先使用 CloakHQ 补丁版 Chromium（58 项 C++ 级反检测补丁），自动降级到 Playwright + JS 注入方案。支持人类化行为模拟（鼠标、键盘、滚动）
 - **🔬 智能分析 (SmartAnalyzer)** — 自动提取页面 DOM 结构、CSS/JS 资源、图片字体、API 端点，并检测前端框架（React、Vue、Angular、Next.js、Nuxt.js 等）
+- **📡 网络流量拦截 (NetworkInterceptor)** — 动态监听页面发出的所有 HTTP 请求/响应，自动触发交互（滚动、点击"加载更多"）来捕获懒加载 API。无需逆向 JS 即可获取完整 API 调用链
 - **🤖 Agent-in-the-Loop 编排 (AgentOrchestrator)** — 深度优先遍历，每个页面都是决策单元。Agent 在每个障碍点介入分析，用户可在浏览器中手动解决登录/验证码后自动接管继续
 - **🔄 人机协作克隆** — 浏览器窗口在遇到登录页时**保持打开**，用户完成登录后工具自动检测并继续后续深度克隆
 - **📦 深度爬取** — 支持多级页面递归克隆，自动下载并重写静态资源引用为本地路径
@@ -57,17 +59,17 @@ python -m weblica compare <TARGET_URL> -d ./cloned -o ./comparison
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         Weblica                                     │
 ├─────────────┬─────────────┬───────────────────┬─────────────────────┤
-│ CloakBrowser│ SmartAnalyzer│ AgentOrchestrator │ WebReplayer         │
-│  (隐蔽浏览器) │  (智能分析器)  │  (Agent编排引擎)   │  (复现服务器)        │
-├─────────────┼─────────────┼───────────────────┼─────────────────────┤
-│ • CloakHQ   │ • DOM 结构   │ • DFS 深度优先     │ • 本地 HTTP 服务     │
-│   补丁内核   │ • 资源提取   │ • 障碍点 Agent 介入 │ • 截图对比          │
-│ • UA 轮换    │ • 框架检测   │ • 浏览器持久化      │ • 交互录制回放       │
-│ • WebDriver  │ • API 发现   │ • 登录自动检测      │                     │
-│   抹除       │ • 表单分析   │ • 断点续传          │                     │
-│ • Canvas     │             │ • 人机协作          │                     │
-│   指纹混淆   │             │                     │                     │
-│ • 人类化行为 │             │                     │                     │
+│ CloakBrowser│ SmartAnalyzer│ NetworkInterceptor│ AgentOrchestrator   │ WebReplayer         │
+│  (隐蔽浏览器) │  (智能分析器)  │  (网络拦截器)      │  (Agent编排引擎)     │  (复现服务器)        │
+├─────────────┼─────────────┼─────────────────┼───────────────────┼─────────────────────┤
+│ • CloakHQ   │ • DOM 结构   │ • 请求/响应监听  │ • DFS 深度优先     │ • 本地 HTTP 服务     │
+│   补丁内核   │ • 资源提取   │ • 自动交互触发   │ • 障碍点 Agent 介入 │ • 截图对比          │
+│ • UA 轮换    │ • 框架检测   │ • API 调用链记录 │ • 浏览器持久化      │ • 交互录制回放       │
+│ • WebDriver  │ • API 发现   │ • Session 回放   │ • 登录自动检测      │                     │
+│   抹除       │ • 表单分析   │                 │ • 断点续传          │                     │
+│ • Canvas     │             │                 │ • 人机协作          │                     │
+│   指纹混淆   │             │                 │                     │                     │
+│ • 人类化行为 │             │                 │                     │                     │
 └─────────────┴─────────────┴───────────────────┴─────────────────────┘
                             │
                     ┌───────┴───────┐

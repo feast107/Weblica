@@ -2,13 +2,15 @@
 
 ## Description
 
-Intelligent Web Application Cloning & Replaying Tool powered by CloakBrowser (CloakHQ patched Chromium with automatic Playwright fallback) and AgentOrchestrator (Agent-in-the-Loop supervision).
+Intelligent Web Application Cloning & Replaying Tool powered by CloakBrowser (CloakHQ patched Chromium), NetworkInterceptor (dynamic HTTP request/response capture), and AgentOrchestrator (Agent-in-the-Loop supervision).
 
 Use this skill when you need to:
 - Clone a web application's frontend for offline analysis or local replay
 - Capture and reproduce web page interactions for testing or demonstration
 - Compare a cloned site against the original for visual regression
 - Extract frontend assets, frameworks, and API endpoints from a target site
+- **Intercept and record all dynamic API calls** triggered by page navigation and user interactions
+- **Reverse-engineer a site's API surface** without reading minified JavaScript
 - Perform stealth web crawling that bypasses basic anti-bot detection
 - Clone sites that require authentication via human-in-the-loop cooperation
 
@@ -93,17 +95,20 @@ python -m weblica clone <URL> [OPTIONS]
 **Output structure:**
 ```
 <output_dir>/
-├── index.html              # Main page (renamed from path)
-├── <other_pages>.html      # Crawled sub-pages
+├── index.html                 # Main page (renamed from path)
+├── <other_pages>.html         # Crawled sub-pages
 ├── assets/
-│   ├── css/                # Downloaded stylesheets
-│   ├── js/                 # Downloaded scripts
-│   ├── images/             # Downloaded images
-│   └── fonts/              # Downloaded fonts
-├── analysis_1.json         # SmartAnalyzer output
-├── weblica-manifest.json   # Clone metadata
-├── weblica-index.html      # Browsable index page
-└── .weblica-state.json     # Resume state for AgentOrchestrator
+│   ├── css/                   # Downloaded stylesheets
+│   ├── js/                    # Downloaded scripts
+│   ├── images/                # Downloaded images
+│   └── fonts/                 # Downloaded fonts
+├── analysis_1.json            # SmartAnalyzer output + network traffic
+│                              #   - network_operations[]: full request/response chain
+│                              #   - api_summary[]: flat list of API calls
+├── weblica-manifest.json      # Clone metadata
+├── weblica-session.json       # Complete session recording (all operations + traffic)
+├── weblica-index.html         # Browsable index page
+└── .weblica-state.json        # Resume state for AgentOrchestrator
 ```
 
 ### 2. Start Local Replay Server
@@ -196,6 +201,20 @@ async def workflow():
 - `async new_page() -> Page` — Get a stealth-initialized Playwright page
 - `async mimic_human_behavior(page)` — Random scroll + mouse movement
 
+**`NetworkInterceptor`** — Dynamic HTTP traffic capture (NEW)
+- Attach to a Playwright `Page`: `interceptor = NetworkInterceptor(page)`
+- `start()` / `stop()` — Begin/end listening
+- `stop_and_collect() -> List[NetworkInteraction]` — Get all request/response pairs
+- Captures XHR/fetch/document/script requests with headers, postData, and response body previews
+- Auto-triggers interactions (scroll, click "load more") to capture lazy-loaded APIs
+
+**`SessionRecorder`** — Session operation chain recorder (NEW)
+- `record_navigate(page, url, depth)` — Record navigation + traffic
+- `record_click(page, selector, depth)` — Record click + resulting traffic
+- `record_input(page, selector, text, depth)` — Record text input + traffic
+- `get_api_summary() -> List[dict]` — Flat list of all API calls across operations
+- `save(path)` — Export full session to JSON
+
 **`AuthManager`** — Authentication handler
 - `apply_to_context(context, base_url)` — Inject cookies, headers before navigation
 - `apply_to_page(page)` — Inject localStorage / sessionStorage
@@ -213,9 +232,30 @@ Use when user wants a full clone with agent supervision.
 ```
 1. python -m weblica clone <URL> -o ./cloned --depth 2 --agent-mode
 2. Agent reviews decision contexts at each obstacle/completed page
-3. Read analysis_*.json for frameworks, APIs, assets
-4. python -m weblica compare <URL> -d ./cloned -o ./comparison
-5. python -m weblica replay -d ./cloned -p 8080
+3. Read analysis_*.json for frameworks, APIs, assets, network traffic
+4. Read weblica-session.json for complete API call chains
+5. python -m weblica compare <URL> -d ./cloned -o ./comparison
+6. python -m weblica replay -d ./cloned -p 8080
+```
+
+**Analyzing captured API traffic:**
+```python
+import json
+
+# Load session report
+with open("cloned/weblica-session.json") as f:
+    session = json.load(f)
+
+# Print all API calls
+for api in session["api_summary"]:
+    print(f"{api['method']} {api['url']} -> {api['status']}")
+
+# Print operations with their before/after page states
+for op in session["operations"]:
+    print(f"Action: {op['action']} on {op['page_url']}")
+    print(f"  Before: {op['before_state']['url']} | {op['before_state']['title']}")
+    print(f"  After:  {op['after_state']['url']} | {op['after_state']['title']}")
+    print(f"  APIs captured: {len(op['api_calls'])}")
 ```
 
 ### Workflow E: Human-in-the-Loop Authenticated Clone (NEW)
