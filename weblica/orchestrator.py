@@ -642,7 +642,7 @@ class AgentOrchestrator:
                             continue
                     
                     # ---- 2.5 Save analysis split ----
-                    await self._save_analysis_split(url, depth, parent, analysis, page_idx)
+                    await self._save_analysis_split(url, depth, parent, analysis, page_idx, page)
                     
                     self.state.completed_urls.append(url)
                     ctx.phase = ClonePhase.COMPLETED
@@ -795,7 +795,7 @@ class AgentOrchestrator:
         
         return ctx
 
-    async def _save_analysis_split(self, url: str, depth: int, parent_url: Optional[str], analysis: PageAnalysis, page_idx: int):
+    async def _save_analysis_split(self, url: str, depth: int, parent_url: Optional[str], analysis: PageAnalysis, page_idx: int, page: Page):
         """Save analysis as split files under analysis/page_NNN/ directory."""
         # Build full analysis data with network traffic included
         analysis_data = json.loads(self.analyzer.export_json(analysis))
@@ -944,6 +944,7 @@ class AgentOrchestrator:
             "files": {
                 "metadata": "metadata.json",
                 "dom": "dom.html",
+                "screenshot": "screenshot.png",
                 "assets": "assets.json",
                 "links": "links.json",
                 "forms": "forms.json",
@@ -955,6 +956,32 @@ class AgentOrchestrator:
         (analysis_dir / "index.json").write_text(
             json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8"
         )
+        
+        # ---- P1: Screenshot ----
+        try:
+            await page.screenshot(path=analysis_dir / "screenshot.png", full_page=True)
+        except Exception as e:
+            print(f"    [WARN] Screenshot failed for {url}: {e}")
+        
+        # ---- P3: iframe content capture ----
+        try:
+            frames = page.frames
+            iframe_count = 0
+            for i, frame in enumerate(frames):
+                if frame == page.main_frame:
+                    continue
+                try:
+                    iframe_html = await frame.evaluate("() => document.documentElement.outerHTML")
+                    if iframe_html and len(iframe_html) > 100:
+                        iframe_path = analysis_dir / f"iframe_{iframe_count:02d}.html"
+                        iframe_path.write_text(iframe_html, encoding="utf-8")
+                        iframe_count += 1
+                except Exception:
+                    continue
+            if iframe_count > 0:
+                print(f"    [OK] Captured {iframe_count} iframe(s) for {url}")
+        except Exception as e:
+            print(f"    [WARN] iframe capture failed for {url}: {e}")
     
     async def _auto_interact(self, page: Page, url: str, depth: int):
         """

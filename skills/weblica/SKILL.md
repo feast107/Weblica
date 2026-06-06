@@ -109,6 +109,8 @@ python -m weblica clone <URL> [OPTIONS]
 │       ├── index.json         # Overview: URL, title, depth, parent_url, file manifest
 │       ├── metadata.json      # Title, description, meta tags, detected frameworks
 │       ├── dom.html           # Full page HTML (open directly in browser)
+│       ├── screenshot.png     # Full page screenshot
+│       ├── iframe_00.html     # iframe content (when embedded frames exist)
 │       ├── assets.json        # CSS, JS, images, fonts referenced by this page
 │       ├── links.json         # Discovered internal links
 │       ├── forms.json         # Forms and buttons (backward-compatible)

@@ -62,7 +62,7 @@ class WebCloner:
         )
         await self.browser.launch()
         
-        connector = aiohttp.TCPConnector(limit=50, limit_per_host=10)
+        connector = aiohttp.TCPConnector(limit=50, limit_per_host=10, ssl=False)
         self.session = aiohttp.ClientSession(
             connector=connector,
             headers={

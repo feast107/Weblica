@@ -28,7 +28,8 @@ python -m weblica compare <TARGET_URL> -d ./cloned -o ./comparison
 
 **关键输出目录：**
 - `./cloned/` — 克隆结果（HTML + assets）
-- `./cloned/analysis/page_001/` — 页面分析报告目录（按种类拆分的 JSON 文件）
+- `./cloned/analysis/page_001/` — 页面分析报告目录（按种类拆分的 JSON/HTML/PNG 文件，含截图、iframe、DOM 快照）
+- `./cloned/navigation.json` — 站点全局导航树（parent→children、depth 分组）
 - `./cloned/weblica-manifest.json` — 克隆元数据（页面数、资源数）
 - `./cloned/weblica-session.json` — **完整网络会话记录**（所有请求/响应、操作链、API 汇总）
 - `./cloned/.weblica-state.json` — 断点续传状态文件
@@ -40,7 +41,10 @@ python -m weblica compare <TARGET_URL> -d ./cloned -o ./comparison
 
 - **🕵️ 隐蔽克隆 (CloakBrowser)** — 优先使用 CloakHQ 补丁版 Chromium（58 项 C++ 级反检测补丁），自动降级到 Playwright + JS 注入方案。支持人类化行为模拟（鼠标、键盘、滚动）
 - **🔬 智能分析 (SmartAnalyzer)** — 自动提取页面 DOM 结构、CSS/JS 资源、图片字体、API 端点，并检测前端框架（React、Vue、Angular、Next.js、Nuxt.js 等）
-- **📡 网络流量拦截 (NetworkInterceptor)** — 动态监听页面发出的所有 HTTP 请求/响应，自动触发交互（滚动、点击"加载更多"）来捕获懒加载 API。无需逆向 JS 即可获取完整 API 调用链
+- **📡 网络流量拦截 (NetworkInterceptor)** — 动态监听页面发出的所有 HTTP 请求/响应，捕获完整响应体（文本类型，上限 500KB），自动触发交互来捕获懒加载 API
+- **📸 页面截图** — 每个克隆页面保存 `screenshot.png`（完整页面截图），便于视觉验证与对比
+- **🖼️ iframe 内容捕获** — 自动提取并保存页面内所有非主框架 iframe 的 HTML 内容（`iframe_00.html`、`iframe_01.html`…）
+- **🔓 SSL 证书跳过** — 资源下载自动忽略 SSL 验证错误，支持证书不匹配或自签名证书的站点
 - **🤖 Agent-in-the-Loop 编排 (AgentOrchestrator)** — 深度优先遍历，每个页面都是决策单元。Agent 在每个障碍点介入分析，用户可在浏览器中手动解决登录/验证码后自动接管继续
 - **🔄 人机协作克隆** — 浏览器窗口在遇到登录页时**保持打开**，用户完成登录后工具自动检测并继续后续深度克隆
 - **📦 深度爬取** — 支持多级页面递归克隆，自动下载并重写静态资源引用为本地路径
@@ -171,17 +175,24 @@ cloned/
 │   ├── css/                   # 样式表
 │   ├── js/                    # 脚本
 │   ├── images/                # 图片
-│   └── fonts/                 # 字体
+│   ├── fonts/                 # 字体
+│   └── api/                   # 捕获的 API 响应样本
 ├── analysis/
 │   └── page_001/              # 页面分析目录（按种类拆分）
-│       ├── index.json         # 概览：URL、资源计数、文件清单
+│       ├── index.json         # 概览：URL、title、depth、parent_url、文件清单
 │       ├── metadata.json      # 标题、描述、Meta 标签、框架检测
-│       ├── dom.json           # HTML 结构、正文文本
+│       ├── dom.html           # 完整页面 HTML（可直接在浏览器中打开）
+│       ├── screenshot.png     # 完整页面截图
+│       ├── iframe_00.html     # iframe 内容（如有内嵌框架）
 │       ├── assets.json        # CSS、JS、图片、字体
 │       ├── links.json         # 外链与内链
-│       ├── forms.json         # 表单、按钮
-│       └── network.json       # 网络流量、API 调用（可能最大）
+│       ├── forms.json         # 表单、按钮（向后兼容）
+│       ├── interactions.json  # 增强交互元素：按钮/链接/输入框，含 selector、onclick、href
+│       ├── network.json       # 网络流量 + API 调用（含完整 request/response bodies）
+│       └── snapshots.json     # 交互前后的 DOM 快照（滚动、点击等）
+├── navigation.json            # 站点全局导航树（parent→children、depth 分组）
 ├── weblica-manifest.json      # 克隆清单
+├── weblica-session.json       # 完整会话记录（操作链 + 流量）
 ├── weblica-index.html         # 索引浏览页
 └── .weblica-state.json        # 断点续传状态
 ```
@@ -317,13 +328,15 @@ Step 1: python -m weblica clone <URL> -o ./cloned --bearer-token <TOKEN>
 
 ```
 Step 1: python -m weblica clone <URL> -o ./cloned --depth 2 --agent-mode
-Step 2: 读取 ./cloned/analysis_1.json
-Step 3: 提取并汇报：
-        - frameworks[] → 检测到的前端框架及版本
-        - api_endpoints[] → 发现的 API 端点
-        - scripts[] → JS 资源列表
-        - forms[] → 表单结构
-Step 4: 读取 weblica-manifest.json 汇报总页面数/资源数
+Step 2: 读取 ./cloned/navigation.json 了解站点结构与层级
+Step 3: 读取 ./cloned/analysis/page_001/index.json 获取概览
+Step 4: 深入分析各页面：
+        - analysis/page_*/metadata.json → frameworks[]（检测到的前端框架及版本）
+        - analysis/page_*/network.json → api_endpoints[]（发现的 API 端点，含完整响应体）
+        - analysis/page_*/assets.json → scripts[]（JS 资源列表）
+        - analysis/page_*/interactions.json → buttons/links/inputs（交互元素与 selector）
+        - analysis/page_*/snapshots.json → DOM 变化（交互前后对比）
+Step 5: 读取 weblica-manifest.json 汇报总页面数/资源数
 ```
 
 ### 模板 C：交互验证
@@ -459,13 +472,17 @@ weblica/
 ```
 analysis/
 └── page_001/
-    ├── index.json      # 概览：URL、各类资源计数、文件清单
-    ├── metadata.json   # 标题、描述、Meta 标签、检测到的前端框架
-    ├── dom.json        # HTML DOM 结构、正文文本
-    ├── assets.json     # CSS、JS、图片、字体资源列表
-    ├── links.json      # 页面内所有链接
-    ├── forms.json      # 表单和按钮
-    └── network.json    # 完整网络流量、API 调用记录（通常最大）
+    ├── index.json         # 概览：URL、title、depth、parent_url、文件清单
+    ├── metadata.json      # 标题、描述、Meta 标签、检测到的前端框架
+    ├── dom.html           # 完整页面 HTML（可直接在浏览器中打开）
+    ├── screenshot.png     # 完整页面截图
+    ├── iframe_00.html     # iframe 内容（如有内嵌框架）
+    ├── assets.json        # CSS、JS、图片、字体资源列表
+    ├── links.json         # 页面内所有链接
+    ├── forms.json         # 表单和按钮（向后兼容）
+    ├── interactions.json  # 增强交互元素：按钮/链接/输入框，含 selector、onclick、href
+    ├── network.json       # 完整网络流量、API 调用记录（含完整 request/response bodies）
+    └── snapshots.json     # 交互前后的 DOM 快照
 ```
 
 **`index.json` 示例：**
@@ -475,17 +492,22 @@ analysis/
   "page_index": 1,
   "url": "https://example.com",
   "title": "Example Domain",
+  "depth": 0,
+  "parent_url": null,
   "assets_count": 12,
   "links_count": 8,
   "forms_count": 2,
   "api_calls_count": 15,
   "files": {
     "metadata": "metadata.json",
-    "dom": "dom.json",
+    "dom": "dom.html",
+    "screenshot": "screenshot.png",
     "assets": "assets.json",
     "links": "links.json",
     "forms": "forms.json",
-    "network": "network.json"
+    "interactions": "interactions.json",
+    "network": "network.json",
+    "snapshots": "snapshots.json"
   }
 }
 ```
@@ -513,6 +535,7 @@ analysis/
 |------|------|------|
 | `Browser not launched` | Playwright 浏览器未安装 | `playwright install chromium` |
 | `TimeoutError` | 页面加载过慢或被拦截 | 检查网络/代理，或增加超时 |
+| `SSL certificate verify failed` | 目标站点证书不匹配 | 已自动忽略（`ssl=False`），无需处理 |
 | `404 on assets` | CDN 跨域资源 | 正常现象，部分资源可能无法下载 |
 | `PIL not available` | Pillow 未安装 | `pip install Pillow` 以生成 diff 图 |
 | `Address already in use` | 端口被占用 | 换用 `-p <其他端口>` |
