@@ -525,7 +525,7 @@ class AgentOrchestrator:
                     ctx.phase = ClonePhase.ANALYZING
                     analysis = await self.analyzer.analyze(page)
                     ctx.full_analysis = analysis
-                    ctx.discovered_links = analysis.links[:20]
+                    ctx.discovered_links = analysis.links
                     ctx.discovered_assets = (
                         len(analysis.stylesheets) + len(analysis.scripts) +
                         len(analysis.images) + len(analysis.fonts)
@@ -659,18 +659,49 @@ class AgentOrchestrator:
             
             # =============================================================
             # Checkpoint F: Queue decision (BOTH modes — force decide)
-            # This is the "方案2" supervised intervention point.
+            # Agent sees a structured page summary + file references for deep analysis.
             # =============================================================
             if ctx.phase == ClonePhase.COMPLETED and ctx.discovered_links:
+                analysis_dir = self.output_dir / "analysis" / f"page_{page_idx:03d}"
+                
+                # Build rich observation for agent decision-making
+                links_summary = self._build_links_summary(ctx.full_analysis)
+                has_iframe = (analysis_dir / "iframe_00.html").exists()
+                
+                observation = {
+                    "page_summary": {
+                        "title": ctx.snapshot.title,
+                        "url": url,
+                        "depth": depth,
+                        "total_links": len(ctx.discovered_links),
+                        "links_summary": links_summary,
+                        "has_iframe": has_iframe,
+                        "interactive_elements": {
+                            "buttons": len(ctx.full_analysis.buttons_detailed) if ctx.full_analysis else 0,
+                            "inputs": len(ctx.full_analysis.interactive_elements) if ctx.full_analysis else 0,
+                            "forms": len(ctx.full_analysis.forms) if ctx.full_analysis else 0,
+                        },
+                    },
+                    "file_references": {
+                        "dom_html": str(analysis_dir / "dom.html").replace("\\", "/"),
+                        "interactions_json": str(analysis_dir / "interactions.json").replace("\\", "/"),
+                        "network_json": str(analysis_dir / "network.json").replace("\\", "/"),
+                        "screenshot_png": str(analysis_dir / "screenshot.png").replace("\\", "/"),
+                    },
+                    "queue_size": len(self.state.url_queue),
+                    "current_depth": depth,
+                    "discovered_links": ctx.discovered_links[:50],  # Keep first 50 for tool-level filtering
+                }
+                
+                # Add iframe reference if exists
+                if has_iframe:
+                    observation["file_references"]["iframe_html"] = str(analysis_dir / "iframe_00.html").replace("\\", "/")
+                
                 ctx = await self._agent_decide(
                     ctx,
                     actions=["continue", "filter_links", "add_link", "switch_mode", "abort"],
                     force_decide=True,
-                    observation={
-                        "queue_size": len(self.state.url_queue),
-                        "discovered_links": ctx.discovered_links,
-                        "current_depth": depth,
-                    },
+                    observation=observation,
                 )
                 yield ctx
                 
@@ -688,11 +719,36 @@ class AgentOrchestrator:
                     excluded = set(ctx.action_params["exclude"])
                     links_to_queue = [l for l in links_to_queue if l not in excluded]
                 
+                # Agent can also provide category-based filtering
+                if ctx.action_params.get("include_categories"):
+                    cats = set(ctx.action_params["include_categories"])
+                    filtered = []
+                    for link in links_to_queue:
+                        for item in ctx.full_analysis.links_detailed if ctx.full_analysis else []:
+                            if item.get("url") == link:
+                                cls = item.get("class", "").lower()
+                                if any(c in cls for c in ["nav", "sidebar", "menu"]) and "sidebar_menu" in cats:
+                                    filtered.append(link)
+                                    break
+                                if any(c in cls for c in ["btn", "toolbar", "operate"]) and "toolbar" in cats:
+                                    filtered.append(link)
+                                    break
+                                if any(c in cls for c in ["page", "pagination"]) and "pagination" in cats:
+                                    filtered.append(link)
+                                    break
+                    links_to_queue = filtered
+                
                 # Safety net: dangerous links
                 DANGEROUS = ['logout', 'signout', 'exit', 'quit', 'sign-out', 'log-out']
                 safe_links = [l for l in links_to_queue if not any(d in l.lower() for d in DANGEROUS)]
                 if len(safe_links) < len(links_to_queue):
                     print(f"    [FILTER] Skipped {len(links_to_queue)-len(safe_links)} dangerous link(s)")
+                
+                # Safety net: max queue limit per page (prevent explosion)
+                MAX_QUEUE_LINKS = 30
+                if len(safe_links) > MAX_QUEUE_LINKS:
+                    print(f"    [FILTER] Truncated to {MAX_QUEUE_LINKS} links (was {len(safe_links)})")
+                    safe_links = safe_links[:MAX_QUEUE_LINKS]
                 
                 new_items = [
                     (link, depth + 1, url)
@@ -1336,6 +1392,45 @@ class AgentOrchestrator:
         nav_path.write_text(json.dumps(nav, indent=2, ensure_ascii=False), encoding="utf-8")
         print(f"[ORCH] Navigation map: {nav_path}")
 
+    def _build_links_summary(self, analysis) -> Dict[str, Any]:
+        """Categorize discovered links by their role in the page (sidebar, toolbar, pagination, content)."""
+        summary = {
+            "total": len(analysis.links) if analysis else 0,
+            "by_category": {},
+            "samples": {}
+        }
+        if not analysis or not hasattr(analysis, 'links_detailed'):
+            return summary
+        
+        categories = {"sidebar_menu": [], "toolbar": [], "pagination": [], "content": [], "other": []}
+        
+        for link in analysis.links_detailed:
+            url = link.get("url", "")
+            text = link.get("text", "")
+            selector = link.get("selector", "")
+            cls = link.get("class", "") or ""
+            
+            item = {"text": text, "href": url, "selector": selector}
+            
+            if "nav" in cls.lower() or "sidebar" in cls.lower() or "menu" in cls.lower():
+                categories["sidebar_menu"].append(item)
+            elif "btn" in cls.lower() or "toolbar" in cls.lower() or "operate" in cls.lower():
+                categories["toolbar"].append(item)
+            elif "page" in cls.lower() or "pagination" in cls.lower():
+                categories["pagination"].append(item)
+            elif any(k in url.lower() for k in ['detail', 'view', 'edit', 'add', 'del']):
+                categories["content"].append(item)
+            else:
+                categories["other"].append(item)
+        
+        # Build summary with counts and samples
+        for cat, items in categories.items():
+            if items:
+                summary["by_category"][cat] = len(items)
+                summary["samples"][cat] = items[:8]  # Keep first 8 as samples
+        
+        return summary
+    
     async def _build_iframe_route_map(self):
         """Build iframe_route_map.json — maps container pages to iframe src URLs and matched content pages."""
         import re
