@@ -98,8 +98,13 @@ class WebCloner:
         for subdir in ["css", "js", "images", "fonts", "api"]:
             (assets_dir / subdir).mkdir(parents=True, exist_ok=True)
         
-        # Start recursive cloning
-        await self._clone_page(url, depth=0)
+        # Start BFS cloning
+        queue = [(url, 0)]
+        while queue:
+            current_url, depth = queue.pop(0)  # BFS: FIFO
+            links = await self._clone_page(current_url, depth)
+            if links and depth < self.max_depth:
+                queue.extend([(link, depth + 1) for link in links])
         
         # Generate index and manifest
         await self._generate_manifest()
@@ -116,6 +121,7 @@ class WebCloner:
         self.visited_urls.add(url)
         print(f"  [PAGE] Crawling: {url} (depth={depth})")
         
+        safe_links = []
         page = await self.browser.new_page()
         try:
             # Apply auth to context on first page
@@ -177,14 +183,13 @@ class WebCloner:
                 if len(safe_links) < len(analysis.links[:20]):
                     skipped = len(analysis.links[:20]) - len(safe_links)
                     print(f"    [FILTER] Skipped {skipped} dangerous link(s) (logout/signout)")
-                
-                for link in safe_links:
-                    await self._clone_page(link, depth + 1)
                     
         except Exception as e:
             print(f"    [ERR] Error cloning {url}: {e}")
         finally:
             await page.close()
+        
+        return safe_links
 
     async def _download_assets(self, analysis: PageAnalysis, base_url: str):
         """Download all discovered assets."""

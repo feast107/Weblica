@@ -421,7 +421,7 @@ class AgentOrchestrator:
             (assets_dir / subdir).mkdir(parents=True, exist_ok=True)
         
         while self.state.url_queue:
-            url, depth, parent = self.state.url_queue.pop()  # DFS: LIFO
+            url, depth, parent = self.state.url_queue.pop(0)  # BFS: FIFO
             
             if url in self.state.visited_urls:
                 continue
