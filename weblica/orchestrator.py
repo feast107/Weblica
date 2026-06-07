@@ -20,6 +20,7 @@ Design principles:
 """
 
 import json
+import re
 import asyncio
 from enum import Enum, auto
 from pathlib import Path
@@ -388,6 +389,260 @@ class AgentOrchestrator:
                 print(f"    [AGENT] Screenshot: {path}")
             except Exception as e:
                 print(f"    [AGENT] Screenshot failed: {e}")
+
+    # ------------------------------------------------------------------
+    # P0: interact_and_capture — Execute interaction on cloned page
+    # ------------------------------------------------------------------
+
+    async def interact_and_capture(
+        self,
+        base_url: str,
+        action: str,
+        selector: str = None,
+        params: dict = None,
+        wait_for_navigation: bool = True,
+        timeout: int = 10000,
+    ) -> dict:
+        """Execute an interaction on a cloned page and capture the result.
+
+        Opens a fresh page, navigates to base_url, applies auth, executes
+        the specified interaction (click/input/scroll), waits for the result,
+        and records before/after screenshots, DOM changes, and any captured
+        network traffic.
+
+        If the interaction triggers navigation (URL change or iframe src change),
+        the new state is analyzed and saved as a new analysis/page_NNN/ entry.
+
+        Args:
+            base_url: The starting page URL.
+            action: One of "click", "input", "scroll", "wait", "navigate".
+            selector: CSS selector for the target element.
+            params: Additional action parameters (e.g. {"value": "text"} for input).
+            wait_for_navigation: Whether to wait for URL change after the action.
+            timeout: Max ms to wait for navigation.
+
+        Returns:
+            Dict with interaction_type, before/after state, snapshot paths,
+            captured_traffic, and new_page info if navigation occurred.
+        """
+        import time
+        timestamp = int(time.time())
+        safe_selector = re.sub(r'[^a-zA-Z0-9]', '_', selector or 'no_selector')[:30]
+        action_name = re.sub(r'[^a-zA-Z0-9]', '_', action)[:20]
+        interaction_dir = self.output_dir / "analysis" / "interactions" / f"{timestamp}_{action_name}_{safe_selector}"
+        interaction_dir.mkdir(parents=True, exist_ok=True)
+
+        page = await self.cloner.browser.new_page()
+
+        try:
+            # Apply auth
+            if self.auth_manager:
+                await self.auth_manager.apply_to_context(page.context, base_url)
+                await self.auth_manager.apply_to_page(page)
+
+            # Navigate to base page
+            await page.goto(base_url, wait_until="networkidle", timeout=60000)
+            await asyncio.sleep(1.5)
+
+            # Record before state
+            before_url = page.url
+            before_title = await page.title()
+            before_html = await page.content()
+
+            # Screenshot before
+            before_ss = interaction_dir / "before.png"
+            await page.screenshot(path=str(before_ss), full_page=True)
+
+            # Start network interceptor
+            interceptor = NetworkInterceptor(page)
+            interceptor.start()
+
+            # Execute interaction
+            action_params = {"target": selector}
+            if params:
+                action_params.update(params)
+            action_error = None
+            try:
+                await self._execute_action(page, action, action_params)
+            except Exception as e:
+                action_error = str(e)
+                print(f"    [interact_and_capture] Action failed: {action_error}")
+
+            # Wait for result
+            if wait_for_navigation:
+                try:
+                    await page.wait_for_url("**", timeout=timeout)
+                except Exception:
+                    pass  # No navigation occurred
+                await asyncio.sleep(2)
+            else:
+                await asyncio.sleep(2)
+
+            # Collect network traffic
+            captured_traffic = interceptor.stop_and_collect()
+
+            # Record after state
+            after_url = page.url
+            after_title = await page.title()
+            after_html = await page.content()
+
+            # Screenshot after
+            after_ss = interaction_dir / "after.png"
+            await page.screenshot(path=str(after_ss), full_page=True)
+
+            # Detect interaction type
+            interaction_type = "no_change"
+            new_page_result = None
+
+            if before_url != after_url:
+                interaction_type = "navigation"
+                new_page_result = await self._capture_new_page(page, after_url, base_url)
+            else:
+                # Check for DOM changes
+                if before_html != after_html:
+                    interaction_type = "dom_update"
+                    # Check for iframe navigation
+                    iframe_before = re.findall(r'<iframe[^>]+src=["\']([^"\']+)["\']', before_html)
+                    iframe_after = re.findall(r'<iframe[^>]+src=["\']([^"\']+)["\']', after_html)
+                    if iframe_before != iframe_after:
+                        interaction_type = "iframe_navigation"
+                        new_page_result = await self._capture_iframe_change(page, base_url, iframe_after)
+
+            # Save DOM diff summary
+            dom_diff_summary = self._summarize_dom_diff(before_html, after_html)
+            dom_diff_path = interaction_dir / "dom_diff.json"
+            dom_diff_path.write_text(json.dumps({
+                "before_url": before_url,
+                "after_url": after_url,
+                "interaction_type": interaction_type,
+                "dom_changed": before_html != after_html,
+                "summary": dom_diff_summary,
+                "captured_api_calls": len(captured_traffic),
+                "action": action,
+                "selector": selector,
+                "params": params,
+                "action_error": action_error,
+            }, indent=2, ensure_ascii=False), encoding="utf-8")
+
+            # Build relative paths for output
+            def _rel(p: Path) -> str:
+                return str(p.relative_to(self.output_dir)).replace("\\", "/")
+
+            return {
+                "interaction_type": interaction_type,
+                "action_error": action_error,
+                "before": {"url": before_url, "title": before_title},
+                "after": {"url": after_url, "title": after_title},
+                "snapshot": {
+                    "before_screenshot": _rel(before_ss),
+                    "after_screenshot": _rel(after_ss),
+                    "interaction_dir": _rel(interaction_dir),
+                    "dom_diff": _rel(dom_diff_path),
+                },
+                "captured_traffic": [
+                    {
+                        "method": t.request.method,
+                        "url": t.request.url,
+                        "status": t.response.status if t.response else None,
+                        "response_body_preview": (t.response.body[:500] if t.response and t.response.body else None),
+                    }
+                    for t in captured_traffic[:30]
+                ],
+                "new_page": new_page_result,
+            }
+        finally:
+            await page.close()
+
+    async def _capture_new_page(self, page: Page, url: str, parent_url: str) -> dict:
+        """Analyze and save a new page discovered during interaction."""
+        analysis = await self.analyzer.analyze(page)
+
+        # Find next available page index
+        analysis_root = self.output_dir / "analysis"
+        analysis_root.mkdir(parents=True, exist_ok=True)
+        existing = [d.name for d in analysis_root.iterdir() if d.is_dir() and d.name.startswith("page_")]
+        page_idx = len(existing) + 1
+
+        await self._save_analysis_split(url, 0, parent_url, analysis, page_idx, page)
+
+        analysis_subdir = analysis_root / f"page_{page_idx:03d}"
+
+        return {
+            "page_index": page_idx,
+            "analysis_dir": analysis_subdir.name,
+            "page_summary": {
+                "title": analysis.title,
+                "url": url,
+                "total_links": len(analysis.links),
+                "total_buttons": len(getattr(analysis, "buttons_detailed", [])),
+            },
+            "file_references": {
+                "dom_html": str(analysis_subdir / "dom.html").replace("\\", "/"),
+                "interactions_json": str(analysis_subdir / "interactions.json").replace("\\", "/"),
+                "network_json": str(analysis_subdir / "network.json").replace("\\", "/"),
+                "screenshot_png": str(analysis_subdir / "screenshot.png").replace("\\", "/"),
+            }
+        }
+
+    async def _capture_iframe_change(self, page: Page, parent_url: str, iframe_srcs: list) -> dict:
+        """Capture iframe content when iframe src changes."""
+        # For iframe navigation, analyze the parent page (which contains the new iframe).
+        # The iframe content will be captured by _save_analysis_split's iframe logic.
+        analysis = await self.analyzer.analyze(page)
+
+        analysis_root = self.output_dir / "analysis"
+        analysis_root.mkdir(parents=True, exist_ok=True)
+        existing = [d.name for d in analysis_root.iterdir() if d.is_dir() and d.name.startswith("page_")]
+        page_idx = len(existing) + 1
+
+        await self._save_analysis_split(page.url, 0, parent_url, analysis, page_idx, page)
+
+        analysis_subdir = analysis_root / f"page_{page_idx:03d}"
+
+        return {
+            "page_index": page_idx,
+            "analysis_dir": analysis_subdir.name,
+            "page_summary": {
+                "title": analysis.title,
+                "url": page.url,
+                "total_links": len(analysis.links),
+                "iframe_srcs": iframe_srcs,
+            },
+            "file_references": {
+                "dom_html": str(analysis_subdir / "dom.html").replace("\\", "/"),
+                "interactions_json": str(analysis_subdir / "interactions.json").replace("\\", "/"),
+                "network_json": str(analysis_subdir / "network.json").replace("\\", "/"),
+                "screenshot_png": str(analysis_subdir / "screenshot.png").replace("\\", "/"),
+            }
+        }
+
+    def _summarize_dom_diff(self, before_html: str, after_html: str) -> str:
+        """Summarize DOM changes between two HTML states."""
+        if before_html == after_html:
+            return "No DOM changes detected"
+
+        before_tags = set(re.findall(r'<(\w+)[\s>]', before_html))
+        after_tags = set(re.findall(r'<(\w+)[\s>]', after_html))
+        added = after_tags - before_tags
+        removed = before_tags - after_tags
+
+        parts = []
+        if added:
+            parts.append(f"Added tags: {', '.join(sorted(added))}")
+        if removed:
+            parts.append(f"Removed tags: {', '.join(sorted(removed))}")
+
+        size_diff = len(after_html) - len(before_html)
+        if abs(size_diff) > 1000:
+            parts.append(f"Size change: {'+' if size_diff > 0 else ''}{size_diff} bytes")
+
+        # Detect modal / overlay / form patterns
+        if any(tag in after_tags for tag in ["dialog", "modal", "overlay", "toast"]):
+            parts.append("Modal/overlay detected")
+        if "form" in after_tags and "form" not in before_tags:
+            parts.append("Form element appeared")
+
+        return "; ".join(parts) if parts else "Minor DOM changes"
 
     # ------------------------------------------------------------------
     # Core DFS loop (hybrid mode)

@@ -236,6 +236,12 @@ async def workflow():
 - `async _observe_page(page)` — Collect visible buttons, inputs, scroll state, modals for agent decisions
 - `async _execute_action(page, action, params)` — Execute scroll/click/input/wait/screenshot
 - `async _wait_for_browser_login(page, timeout)` — Poll browser for login success
+- **`async interact_and_capture(base_url, action, selector, params, wait_for_navigation, timeout)` — P0 API**
+  - Opens a fresh page, navigates to `base_url`, applies auth, executes the interaction
+  - Captures before/after screenshots, DOM diff, and network traffic into `analysis/interactions/TIMESTAMP_ACTION_SELECTOR/`
+  - Detects `interaction_type`: `navigation` (URL changed) / `dom_update` (DOM changed) / `iframe_navigation` (iframe src changed) / `no_change`
+  - If navigation/iframe_navigation occurs, automatically analyzes and saves the new state as `analysis/page_NNN/`
+  - Returns dict with `interaction_type`, `action_error`, `before`/`after`, `snapshot`, `captured_traffic`, `new_page`
 - Browser page is KEPT OPEN when obstacles are detected
 - State persisted to `.weblica-state.json` after each page
 

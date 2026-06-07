@@ -415,6 +415,38 @@ async def agent_workflow():
 asyncio.run(agent_workflow())
 ```
 
+### 独立交互捕获 (`interact_and_capture`)
+
+在已克隆的页面上执行任意点击/输入/滚动操作，捕获交互前后的 DOM 变化、截图和网络流量。如果交互触发了导航（URL 变化或 iframe src 变化），新页面会被自动分析并保存为 `analysis/page_NNN/` 条目。
+
+```python
+async with AgentOrchestrator(
+    start_url="https://example.com/dashboard",
+    output_dir="./cloned",
+    auth_manager=auth,
+) as orch:
+    # 点击表格中的"编辑"按钮，捕获弹出的表单结构
+    result = await orch.interact_and_capture(
+        base_url="https://example.com/dashboard",
+        action="click",
+        selector="a[data-operate-edit='module/edit']",
+        wait_for_navigation=True,
+        timeout=10000,
+    )
+    print(result["interaction_type"])  # "navigation" | "dom_update" | "iframe_navigation" | "no_change"
+    print(result["snapshot"]["before_screenshot"])  # 交互前截图路径
+    print(result["snapshot"]["after_screenshot"])   # 交互后截图路径
+    print(result["new_page"]["analysis_dir"])       # 新页面分析目录（如果导航发生）
+```
+
+返回结果包含：
+- `interaction_type`: `navigation`（页面跳转）/ `dom_update`（DOM 变化）/ `iframe_navigation`（iframe 路由变化）/ `no_change`
+- `action_error`: 如果交互执行失败，此处记录错误信息
+- `before`/`after`: URL 和标题快照
+- `snapshot`: before/after 截图、dom_diff.json、interaction 目录的相对路径
+- `captured_traffic`: 交互过程中捕获的 API 请求（method/url/status/body_preview）
+- `new_page`: 导航发生时，新页面的 `page_index`、`analysis_dir`、`page_summary`、`file_references`
+
 ---
 
 ## 项目结构
