@@ -167,6 +167,72 @@ python -m weblica compare <URL> [OPTIONS]
 
 Produces: `original.png`, `explored.png`, `diff.png` (if Pillow available)
 
+## Session API（有状态浏览器会话）
+
+Weblica 可以作为**长期浏览器会话服务**运行，Agent 通过 HTTP API 远程控制浏览器。浏览器在 API 调用之间保持打开，Agent 可以随时暂停、查询状态、继续操作。
+
+### 启动服务
+
+```bash
+python -m weblica.api_server
+# → http://localhost:8765
+```
+
+### Agent 工作流
+
+```
+Step 1: POST /sessions                    → 获取 session_id
+Step 2: POST /sessions/{id}/navigate      → 导航到目标
+Step 3: POST /sessions/{id}/click         → 执行交互
+Step 4: GET  /sessions/{id}/state         → 查询当前状态（随时可调用）
+Step 5: GET  /sessions/{id}/screenshot    → 获取截图
+Step 6: GET  /sessions/{id}/interactive-elements → 获取可点击元素列表
+Step 7: POST /sessions/{id}/save          → 持久化到磁盘
+Step 8: DELETE /sessions/{id}             → 销毁
+```
+
+### 核心端点
+
+| 端点 | 用途 | Agent 何时调用 |
+|------|------|---------------|
+| `POST /sessions` | 创建会话 | 开始新任务时 |
+| `POST /sessions/{id}/navigate?url=...` | 导航 | 进入新页面 |
+| `POST /sessions/{id}/click?selector=...` | 点击 | 执行交互操作 |
+| `POST /sessions/{id}/input?selector=...&value=...` | 输入 | 填写表单 |
+| `GET /sessions/{id}/state` | 状态快照 | 每次操作后检查结果 |
+| `GET /sessions/{id}/screenshot` | 截图 | 视觉验证 |
+| `GET /sessions/{id}/interactive-elements` | 可交互元素 | 决定下一步操作 |
+| `GET /sessions/{id}/network-log` | 网络日志 | 分析 API 调用 |
+| `POST /sessions/{id}/save` | 持久化 | 关键节点保存 |
+| `DELETE /sessions/{id}` | 销毁 | 任务完成 |
+
+### 状态快照（每次操作返回）
+
+```json
+{
+  "session_id": "abc123",
+  "interaction_type": "dom_update",
+  "current_url": "https://example.com/admin",
+  "current_title": "Dashboard",
+  "html_length": 45231,
+  "history_length": 5,
+  "action": "click",
+  "params": {"selector": "a.btn-add"},
+  "timestamp": "2026-06-07T23:03:00"
+}
+```
+
+**Agent 策略：**
+- 调用 `navigate` 或 `click` 后，读取返回的 `interaction_type`
+  - `"navigation"` → URL 变了，页面跳转
+  - `"dom_update"` → DOM 变化但 URL 没变（弹窗/表单出现）
+  - `"no_change"` → 无变化
+- 调用 `interactive-elements` 获取当前页面所有可点击/可输入元素，决定下一步 selector
+- 调用 `screenshot` 做视觉验证
+- 调用 `save` 在关键节点持久化，防止进程崩溃丢失进度
+
+---
+
 ## Python API Reference
 
 For programmatic control within agent workflows:

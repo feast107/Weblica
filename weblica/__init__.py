@@ -18,5 +18,6 @@ __author__ = "Weblica Team"
 from .explorer import WebExplorer
 from .replayer import WebReplayer
 from .browser import CloakBrowser
+from .session_manager import SessionManager, ExplorationSession
 
-__all__ = ["WebExplorer", "WebReplayer", "CloakBrowser"]
+__all__ = ["WebExplorer", "WebReplayer", "CloakBrowser", "SessionManager", "ExplorationSession"]

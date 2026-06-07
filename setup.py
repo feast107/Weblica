@@ -11,6 +11,7 @@ setup(
         "aiohttp>=3.9.0",
         "aiofiles>=23.0.0",
         "Pillow>=10.0.0",
+        "fastapi>=0.100.0",
     ],
     python_requires=">=3.9",
     entry_points={

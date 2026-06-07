@@ -355,6 +355,85 @@ Step 5: 对比回放结果，报告交互是否成功
 
 ---
 
+## Session API（有状态浏览器会话）
+
+Weblica 现在可以作为**长期运行的浏览器会话服务**使用。Agent 通过 HTTP API 创建会话、自由探索、随时查询状态、暂停后恢复——浏览器始终保持打开。
+
+### 启动会话服务
+
+```bash
+python -m weblica.api_server
+# → Uvicorn running on http://0.0.0.0:8765
+```
+
+### Agent 工作流示例
+
+```bash
+# 1. 创建会话
+curl -X POST "http://localhost:8765/sessions"
+# → {"session_id": "abc123", "status": "created"}
+
+# 2. 导航到目标页
+curl -X POST "http://localhost:8765/sessions/abc123/navigate?url=https://example.com"
+
+# 3. 点击按钮
+curl -X POST "http://localhost:8765/sessions/abc123/click?selector=a.btn-add"
+
+# 4. 随时查询状态（可以暂停做任何事，再回来查）
+curl "http://localhost:8765/sessions/abc123/state"
+
+# 5. 获取当前截图
+curl "http://localhost:8765/sessions/abc123/screenshot" -o screenshot.png
+
+# 6. 获取可交互元素列表（含坐标和 selector）
+curl "http://localhost:8765/sessions/abc123/interactive-elements"
+
+# 7. 持久化保存
+curl -X POST "http://localhost:8765/sessions/abc123/save"
+
+# 8. 销毁会话
+curl -X DELETE "http://localhost:8765/sessions/abc123"
+```
+
+### 完整 API 端点
+
+| 方法 | 端点 | 说明 |
+|------|------|------|
+| `POST` | `/sessions` | 创建会话（可选 `headless`, `cookies_file`） |
+| `GET` | `/sessions` | 列出所有活跃会话 |
+| `GET` | `/sessions/{id}/state` | 完整状态快照（URL/标题/HTML长度/历史） |
+| `POST` | `/sessions/{id}/navigate` | 导航到 URL |
+| `POST` | `/sessions/{id}/click` | 点击元素（`selector`, `pre_wait`） |
+| `POST` | `/sessions/{id}/input` | 填充输入框（`selector`, `value`） |
+| `POST` | `/sessions/{id}/scroll` | 滚动页面（`direction`: bottom/top/down/up） |
+| `POST` | `/sessions/{id}/wait` | 等待 N 毫秒 |
+| `GET` | `/sessions/{id}/screenshot` | PNG 截图 |
+| `GET` | `/sessions/{id}/dom` | 当前 HTML |
+| `GET` | `/sessions/{id}/interactive-elements` | 可交互元素列表（含 bounding box） |
+| `GET` | `/sessions/{id}/network-log` | 捕获的网络流量（`?clear=true` 清空） |
+| `POST` | `/sessions/{id}/save` | 持久化到磁盘（cookies/storage/截图/state） |
+| `DELETE` | `/sessions/{id}` | 关闭浏览器并销毁会话 |
+
+### 状态快照示例
+
+每个 mutating 操作返回统一的状态快照：
+
+```json
+{
+  "session_id": "abc123",
+  "interaction_type": "dom_update",
+  "current_url": "https://example.com/admin",
+  "current_title": "Dashboard",
+  "html_length": 45231,
+  "history_length": 5,
+  "action": "click",
+  "params": {"selector": "a.btn-add"},
+  "timestamp": "2026-06-07T23:03:00"
+}
+```
+
+---
+
 ## Python API
 
 ```python
