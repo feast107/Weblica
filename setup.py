@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
     name="weblica",
     version="0.1.0",
-    description="Intelligent Web Application Cloning & Replaying Tool",
+    description="Intelligent Web Application Exploration & Replaying Tool",
     author="Weblica Team",
     packages=find_packages(),
     install_requires=[

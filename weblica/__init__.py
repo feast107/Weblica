@@ -1,8 +1,8 @@
 """
-Weblica - Intelligent Web Application Cloning & Replaying Tool
+Weblica - Intelligent Web Application Exploration & Replaying Tool
 
 A tool powered by CloakBrowser (CloakHQ patched Chromium) with automatic
-fallback to Playwright + JS evasion. Intelligently clones web application
+fallback to Playwright + JS evasion. Intelligently explores web applications
 frontends and replays them locally.
 
 CloakBrowser integration:
@@ -15,8 +15,8 @@ CloakBrowser integration:
 __version__ = "0.1.0"
 __author__ = "Weblica Team"
 
-from .cloner import WebCloner
+from .explorer import WebExplorer
 from .replayer import WebReplayer
 from .browser import CloakBrowser
 
-__all__ = ["WebCloner", "WebReplayer", "CloakBrowser"]
+__all__ = ["WebExplorer", "WebReplayer", "CloakBrowser"]

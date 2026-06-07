@@ -1,8 +1,8 @@
 """
-Weblica CLI - Command line interface for the cloning and replay tool.
+Weblica CLI - Command line interface for the exploration and replay tool.
 
 Usage:
-    python -m weblica clone <url> [options]
+    python -m weblica explore <url> [options]
     python -m weblica replay [options]
     python -m weblica record <url> [options]
     python -m weblica compare <original_url> [options]
@@ -14,76 +14,77 @@ import json
 import sys
 from pathlib import Path
 
-from .cloner import WebCloner
+from .explorer import WebExplorer
 from .replayer import WebReplayer
 from .auth import AuthManager, AuthConfig
-from .orchestrator import AgentOrchestrator, DecisionContext, ClonePhase, ObstacleType
+from .orchestrator import AgentOrchestrator, DecisionContext, ExplorePhase, ObstacleType
 
 
 def create_parser() -> argparse.ArgumentParser:
     """Create the argument parser."""
     parser = argparse.ArgumentParser(
         prog="weblica",
-        description="Weblica - Intelligent Web Application Cloning & Replaying Tool",
+        description="Weblica - Intelligent Web Application Exploration & Replaying Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s clone https://example.com -o ./my_clone
-  %(prog)s clone https://example.com --headless --depth 2
-  %(prog)s replay -d ./my_clone -p 9090
+  %(prog)s explore https://example.com -o ./my_explore
+  %(prog)s explore https://example.com --headless --depth 2
+  %(prog)s replay -d ./my_explore -p 9090
   %(prog)s record https://example.com --duration 30
-  %(prog)s compare https://example.com -d ./my_clone
+  %(prog)s compare https://example.com -d ./my_explore
         """,
     )
     
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
     
-    # Clone command
-    clone_parser = subparsers.add_parser(
-        "clone",
-        help="Clone a web application",
-        description="Clone a web application using stealth browsing and intelligent analysis.",
+    # Explore command
+    explore_parser = subparsers.add_parser(
+        "explore",
+
+        help="Explore a web application",
+        description="Explore a web application using stealth browsing and intelligent analysis.",
     )
-    clone_parser.add_argument("url", help="Target URL to clone")
-    clone_parser.add_argument(
+    explore_parser.add_argument("url", help="Target URL to explore")
+    explore_parser.add_argument(
         "-o", "--output",
-        default="./cloned",
-        help="Output directory (default: ./cloned)",
+        default="./explored",
+        help="Output directory (default: ./explored)",
     )
-    clone_parser.add_argument(
+    explore_parser.add_argument(
         "--headless",
         action="store_true",
         default=True,
         help="Run browser in headless mode (default: True)",
     )
-    clone_parser.add_argument(
+    explore_parser.add_argument(
         "--no-headless",
         action="store_true",
         dest="no_headless",
-        help="Show browser window during cloning",
+        help="Show browser window during exploring",
     )
-    clone_parser.add_argument(
+    explore_parser.add_argument(
         "-d", "--depth",
         type=int,
         default=1,
         help="Maximum crawl depth (default: 1)",
     )
-    clone_parser.add_argument(
+    explore_parser.add_argument(
         "--proxy",
         help="Proxy server URL (e.g., http://proxy:8080)",
     )
-    clone_parser.add_argument(
+    explore_parser.add_argument(
         "--slow-mo",
         type=int,
         help="Slow down operations by specified milliseconds",
     )
-    clone_parser.add_argument(
+    explore_parser.add_argument(
         "--humanize",
         action="store_true",
         default=True,
         help="Enable human-like mouse/keyboard behavior with CloakBrowser (default: True)",
     )
-    clone_parser.add_argument(
+    explore_parser.add_argument(
         "--no-humanize",
         action="store_true",
         dest="no_humanize",
@@ -91,7 +92,7 @@ Examples:
     )
     
     # Authentication options
-    auth_group = clone_parser.add_argument_group("Authentication")
+    auth_group = explore_parser.add_argument_group("Authentication")
     auth_group.add_argument(
         "--cookies",
         help="Path to JSON file containing cookies",
@@ -107,7 +108,7 @@ Examples:
     auth_group.add_argument(
         "--wait-login",
         action="store_true",
-        help="Pause and wait for manual login before cloning",
+        help="Pause and wait for manual login before exploring",
     )
     auth_group.add_argument(
         "--login-timeout",
@@ -141,12 +142,12 @@ Examples:
     )
     
     # Agent mode
-    clone_parser.add_argument(
+    explore_parser.add_argument(
         "--agent-mode",
         action="store_true",
         help="Enable agent-in-the-loop supervision (DFS, pause at obstacles)",
     )
-    clone_parser.add_argument(
+    explore_parser.add_argument(
         "--agent-stepped",
         action="store_true",
         help="Start in STEPPED mode: agent approves every atomic action (click, scroll, etc.)",
@@ -156,12 +157,12 @@ Examples:
     replay_parser = subparsers.add_parser(
         "replay",
         help="Start local replay server",
-        description="Start a local HTTP server to browse the cloned application.",
+        description="Start a local HTTP server to browse the explored application.",
     )
     replay_parser.add_argument(
         "-d", "--dir",
-        default="./cloned",
-        help="Clone directory to serve (default: ./cloned)",
+        default="./explored",
+        help="Explore directory to serve (default: ./explored)",
     )
     replay_parser.add_argument(
         "-p", "--port",
@@ -192,14 +193,14 @@ Examples:
     # Compare command
     compare_parser = subparsers.add_parser(
         "compare",
-        help="Compare original and clone visually",
-        description="Take screenshots of original and cloned sites for visual comparison.",
+        help="Compare original and explored site visually",
+        description="Take screenshots of original and explored sites for visual comparison.",
     )
     compare_parser.add_argument("url", help="Original URL to compare")
     compare_parser.add_argument(
         "-d", "--dir",
-        default="./cloned",
-        help="Clone directory (default: ./cloned)",
+        default="./explored",
+        help="Explore directory (default: ./explored)",
     )
     compare_parser.add_argument(
         "-o", "--output",
@@ -292,7 +293,7 @@ async def default_agent_callback(ctx: DecisionContext) -> DecisionContext:
     context_file.write_text(json.dumps(context_payload, indent=2, ensure_ascii=False), encoding="utf-8")
     
     # Auto-continue for non-interactive checkpoints in SUPERVISED mode
-    if ctx.mode == "supervised" and ctx.obstacle == ObstacleType.NONE and ctx.phase == ClonePhase.COMPLETED:
+    if ctx.mode == "supervised" and ctx.obstacle == ObstacleType.NONE and ctx.phase == ExplorePhase.COMPLETED:
         ctx.recommended_action = "continue"
         print("Auto-decision: continue (supervised mode, page complete)")
         print("=" * 60 + "\n")
@@ -351,8 +352,8 @@ async def default_agent_callback(ctx: DecisionContext) -> DecisionContext:
         await asyncio.sleep(1)
 
 
-async def handle_clone(args):
-    """Handle clone command."""
+async def handle_explore(args):
+    """Handle explore command."""
     headless = not args.no_headless if args.no_headless else args.headless
     
     # Build auth config
@@ -422,7 +423,7 @@ async def handle_clone(args):
 
 async def handle_replay(args):
     """Handle replay command."""
-    replayer = WebReplayer(clone_dir=args.dir, port=args.port)
+    replayer = WebReplayer(explore_dir=args.dir, port=args.port)
     
     try:
         url = await replayer.start_server()
@@ -449,16 +450,16 @@ async def handle_record(args):
 
 async def handle_compare(args):
     """Handle compare command."""
-    replayer = WebReplayer(clone_dir=args.dir)
+    replayer = WebReplayer(explore_dir=args.dir)
     
     # Start server temporarily
     server_url = await replayer.start_server()
-    clone_url = f"{server_url}/index.html"
+    explored_url = f"{server_url}/index.html"
     
     try:
         results = await replayer.compare_visual(
             original_url=args.url,
-            clone_url=clone_url,
+            explored_url=explored_url,
             output_dir=args.output,
         )
         
@@ -480,7 +481,8 @@ async def main():
         sys.exit(1)
     
     command_handlers = {
-        "clone": handle_clone,
+        "explore": handle_explore,
+
         "replay": handle_replay,
         "record": handle_record,
         "compare": handle_compare,

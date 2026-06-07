@@ -84,7 +84,7 @@ class PageAnalysis:
 
 
 class SmartAnalyzer:
-    """Analyzes web applications to extract cloneable components."""
+    """Analyzes web applications to extract explorable components."""
 
     FRAMEWORK_SIGNATURES = {
         "React": [

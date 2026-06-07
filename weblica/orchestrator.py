@@ -1,7 +1,7 @@
 """
-AgentOrchestrator - Agent-in-the-Loop Cloning Engine
+AgentOrchestrator - Agent-in-the-Loop Exploration Engine
 
-Replaces the "fire-and-forget" batch cloning model with an event-driven,
+Replaces the "fire-and-forget" batch exploration model with an event-driven,
 agent-supervised workflow. The orchestrator pauses at key decision points,
 builds a structured context for the agent, and resumes only after the agent
 chooses an action.
@@ -33,12 +33,12 @@ from playwright.async_api import Page
 from .browser import CloakBrowser
 from .analyzer import SmartAnalyzer, PageAnalysis
 from .auth import AuthManager, AuthConfig
-from .cloner import WebCloner
+from .explorer import WebExplorer
 from .interceptor import NetworkInterceptor, SessionRecorder, PageOperation
 
 
-class ClonePhase(Enum):
-    """Current phase of a page clone operation."""
+class ExplorePhase(Enum):
+    """Current phase of a page explore operation."""
     IDLE = auto()
     NAVIGATING = auto()
     AUTH_CHECKING = auto()
@@ -95,7 +95,7 @@ class DecisionContext:
     the next action. In SUPERVISED mode, the agent only sees high-level
     page results and can switch modes for complex pages.
     """
-    phase: ClonePhase
+    phase: ExplorePhase
     obstacle: ObstacleType
     
     snapshot: PageSnapshot
@@ -121,8 +121,8 @@ class DecisionContext:
 
 
 @dataclass
-class CloneState:
-    """Persisted state of the entire clone job."""
+class ExploreState:
+    """Persisted state of the entire explore job."""
     start_url: str
     max_depth: int
     visited_urls: List[str] = field(default_factory=list)
@@ -136,16 +136,16 @@ class CloneState:
         Path(path).write_text(json.dumps(asdict(self), indent=2, ensure_ascii=False), encoding="utf-8")
     
     @staticmethod
-    def load(path: str) -> "CloneState":
+    def load(path: str) -> "ExploreState":
         data = json.loads(Path(path).read_text(encoding="utf-8"))
-        return CloneState(**{k: v for k, v in data.items()})
+        return ExploreState(**{k: v for k, v in data.items()})
 
 
 class AgentOrchestrator:
     """
-    Main orchestrator that drives the clone with agent supervision.
+    Main orchestrator that drives the explored site with agent supervision.
     
-    Key difference from batch cloner: the browser PAGE stays open when an
+    Key difference from batch explorer: the browser PAGE stays open when an
     obstacle is detected, allowing the user to interact with the real browser
     window to solve login/CAPTCHA challenges.
     """
@@ -153,7 +153,7 @@ class AgentOrchestrator:
     def __init__(
         self,
         start_url: str,
-        output_dir: str = "./cloned",
+        output_dir: str = "./explored",
         max_depth: int = 2,
         headless: bool = True,
         proxy: Optional[str] = None,
@@ -174,8 +174,8 @@ class AgentOrchestrator:
         self.humanize = humanize
         self.agent_mode = AgentMode(agent_mode)
         
-        self.cloner: Optional[WebCloner] = None
-        self.state: Optional[CloneState] = None
+        self.explorer: Optional[WebExplorer] = None
+        self.state: Optional[ExploreState] = None
         self.analyzer = SmartAnalyzer()
         self.recorder = SessionRecorder()
         
@@ -189,7 +189,7 @@ class AgentOrchestrator:
         self._last_decision_ctx: Optional[DecisionContext] = None
 
     async def __aenter__(self):
-        self.cloner = WebCloner(
+        self.explorer = WebExplorer(
             output_dir=str(self.output_dir),
             headless=self.headless,
             max_depth=self.max_depth,
@@ -197,13 +197,13 @@ class AgentOrchestrator:
             auth_manager=self.auth_manager,
             humanize=self.humanize,
         )
-        await self.cloner.__aenter__()
+        await self.explorer.__aenter__()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self._close_active_page()
-        if self.cloner:
-            await self.cloner.__aexit__(exc_type, exc_val, exc_tb)
+        if self.explorer:
+            await self.explorer.__aexit__(exc_type, exc_val, exc_tb)
 
     async def _close_active_page(self):
         """Safely close the active page if one exists."""
@@ -391,7 +391,7 @@ class AgentOrchestrator:
                 print(f"    [AGENT] Screenshot failed: {e}")
 
     # ------------------------------------------------------------------
-    # P0: interact_and_capture — Execute interaction on cloned page
+    # P0: interact_and_capture — Execute interaction on explored page
     # ------------------------------------------------------------------
 
     async def interact_and_capture(
@@ -403,7 +403,7 @@ class AgentOrchestrator:
         wait_for_navigation: bool = True,
         timeout: int = 10000,
     ) -> dict:
-        """Execute an interaction on a cloned page and capture the result.
+        """Execute an interaction on an explored page and capture the result.
 
         Opens a fresh page, navigates to base_url, applies auth, executes
         the specified interaction (click/input/scroll), waits for the result,
@@ -432,7 +432,7 @@ class AgentOrchestrator:
         interaction_dir = self.output_dir / "analysis" / "interactions" / f"{timestamp}_{action_name}_{safe_selector}"
         interaction_dir.mkdir(parents=True, exist_ok=True)
 
-        page = await self.cloner.browser.new_page()
+        page = await self.explorer.browser.new_page()
 
         try:
             # Apply auth
@@ -650,7 +650,7 @@ class AgentOrchestrator:
 
     async def run_dfs(self):
         """
-        Hybrid-mode DFS clone with agent decision points.
+        Hybrid-mode DFS explore with agent decision points.
         
         SUPERVISED mode (方案2): Agent介入 at page completion. Fast path.
         STEPPED mode (方案4): Agent介入 at every atomic action. Full control.
@@ -662,9 +662,9 @@ class AgentOrchestrator:
         # Initialize or resume state
         if Path(self.state_file).exists():
             print(f"[ORCH] Resuming from state file: {self.state_file}")
-            self.state = CloneState.load(self.state_file)
+            self.state = ExploreState.load(self.state_file)
         else:
-            self.state = CloneState(
+            self.state = ExploreState(
                 start_url=self.start_url,
                 max_depth=self.max_depth,
                 url_queue=[(self.start_url, 0, None)],
@@ -777,7 +777,7 @@ class AgentOrchestrator:
                 
                 try:
                     # ---- 2.1 Analyze page ----
-                    ctx.phase = ClonePhase.ANALYZING
+                    ctx.phase = ExplorePhase.ANALYZING
                     analysis = await self.analyzer.analyze(page)
                     ctx.full_analysis = analysis
                     ctx.discovered_links = analysis.links
@@ -819,11 +819,11 @@ class AgentOrchestrator:
                         )
                         yield ctx
                         if ctx.recommended_action == "abort":
-                            ctx.phase = ClonePhase.BLOCKED
+                            ctx.phase = ExplorePhase.BLOCKED
                             await self._close_active_page()
                             break
                         if ctx.recommended_action == "skip":
-                            ctx.phase = ClonePhase.SKIPPED
+                            ctx.phase = ExplorePhase.SKIPPED
                             await self._close_active_page()
                             continue
                     
@@ -842,11 +842,11 @@ class AgentOrchestrator:
                                 break
                         
                         if ctx.recommended_action == "abort":
-                            ctx.phase = ClonePhase.BLOCKED
+                            ctx.phase = ExplorePhase.BLOCKED
                             await self._close_active_page()
                             break
                         if ctx.recommended_action == "skip":
-                            ctx.phase = ClonePhase.SKIPPED
+                            ctx.phase = ExplorePhase.SKIPPED
                             await self._close_active_page()
                             continue
                     else:
@@ -854,8 +854,8 @@ class AgentOrchestrator:
                         await self._auto_interact(page, url, depth)
                     
                     # ---- 2.3 Download assets ----
-                    ctx.phase = ClonePhase.ASSET_DOWNLOADING
-                    await self.cloner._download_assets(analysis, url)
+                    ctx.phase = ExplorePhase.ASSET_DOWNLOADING
+                    await self.explorer._download_assets(analysis, url)
                     
                     # Checkpoint D: Post-download (STEPPED mode)
                     if self.agent_mode == AgentMode.STEPPED:
@@ -865,18 +865,18 @@ class AgentOrchestrator:
                         )
                         yield ctx
                         if ctx.recommended_action == "abort":
-                            ctx.phase = ClonePhase.BLOCKED
+                            ctx.phase = ExplorePhase.BLOCKED
                             await self._close_active_page()
                             break
                         if ctx.recommended_action == "skip":
-                            ctx.phase = ClonePhase.SKIPPED
+                            ctx.phase = ExplorePhase.SKIPPED
                             await self._close_active_page()
                             continue
                     
                     # ---- 2.4 Persist HTML ----
-                    ctx.phase = ClonePhase.PERSISTING
-                    html = await self.cloner._rewrite_html(page, analysis, url)
-                    page_filename = self.cloner._get_page_filename(url)
+                    ctx.phase = ExplorePhase.PERSISTING
+                    html = await self.explorer._rewrite_html(page, analysis, url)
+                    page_filename = self.explorer._get_page_filename(url)
                     html_path = self.output_dir / page_filename
                     html_path.write_text(html, encoding="utf-8")
                     
@@ -888,11 +888,11 @@ class AgentOrchestrator:
                         )
                         yield ctx
                         if ctx.recommended_action == "abort":
-                            ctx.phase = ClonePhase.BLOCKED
+                            ctx.phase = ExplorePhase.BLOCKED
                             await self._close_active_page()
                             break
                         if ctx.recommended_action == "skip":
-                            ctx.phase = ClonePhase.SKIPPED
+                            ctx.phase = ExplorePhase.SKIPPED
                             await self._close_active_page()
                             continue
                     
@@ -900,14 +900,14 @@ class AgentOrchestrator:
                     await self._save_analysis_split(url, depth, parent, analysis, page_idx, page)
                     
                     self.state.completed_urls.append(url)
-                    ctx.phase = ClonePhase.COMPLETED
+                    ctx.phase = ExplorePhase.COMPLETED
                     
                     print(f"    [OK] Completed: {page_filename} | Assets: {ctx.discovered_assets} | Links: {len(ctx.discovered_links)} | APIs: {api_count} | Analysis: analysis/page_{page_idx:03d}/")
                     
                 except Exception as e:
                     print(f"    [ERR] Phase2 failed for {url}: {e}")
                     ctx.obstacle = ObstacleType.UNKNOWN
-                    ctx.phase = ClonePhase.BLOCKED
+                    ctx.phase = ExplorePhase.BLOCKED
             
             # Clean up page
             await self._close_active_page()
@@ -916,7 +916,7 @@ class AgentOrchestrator:
             # Checkpoint F: Queue decision (BOTH modes — force decide)
             # Agent sees a structured page summary + file references for deep analysis.
             # =============================================================
-            if ctx.phase == ClonePhase.COMPLETED and ctx.discovered_links:
+            if ctx.phase == ExplorePhase.COMPLETED and ctx.discovered_links:
                 analysis_dir = self.output_dir / "analysis" / f"page_{page_idx:03d}"
                 
                 # Build rich observation for agent decision-making
@@ -1026,14 +1026,14 @@ class AgentOrchestrator:
         """
         snapshot = PageSnapshot(url=url, title="", depth=depth)
         ctx = DecisionContext(
-            phase=ClonePhase.NAVIGATING,
+            phase=ExplorePhase.NAVIGATING,
             obstacle=ObstacleType.NONE,
             snapshot=snapshot,
             parent_url=parent,
         )
         
         # Create new page and keep reference
-        page = await self.cloner.browser.new_page()
+        page = await self.explorer.browser.new_page()
         self._active_page = page
         
         # Start network interceptor immediately to capture all traffic
@@ -1057,7 +1057,7 @@ class AgentOrchestrator:
             snapshot.status = str(response.status) if response else "unknown"
             
             # Auth checking
-            ctx.phase = ClonePhase.AUTH_CHECKING
+            ctx.phase = ExplorePhase.AUTH_CHECKING
             body_text = await page.evaluate("() => document.body.innerText")
             snapshot.text_preview = body_text[:500] if body_text else ""
             
@@ -1101,7 +1101,7 @@ class AgentOrchestrator:
         except Exception as e:
             ctx.obstacle = ObstacleType.UNKNOWN
             ctx.notes = f"Exception: {str(e)}"
-            ctx.phase = ClonePhase.BLOCKED
+            ctx.phase = ExplorePhase.BLOCKED
             print(f"    [ERR] {url}: {e}")
         
         return ctx
@@ -1592,7 +1592,7 @@ class AgentOrchestrator:
             print(f"[ORCH] Applied storage auth")
 
     async def _generate_navigation(self):
-        """Generate navigation.json — a tree of all cloned pages with parent/child relationships."""
+        """Generate navigation.json — a tree of all explored pages with parent/child relationships."""
         pages = []
         analysis_dir = self.output_dir / "analysis"
         if not analysis_dir.exists():
@@ -1734,14 +1734,14 @@ class AgentOrchestrator:
                         continue
                     absolute_src = urljoin(page_url, src)
                     
-                    # Find best matching cloned page for this iframe URL
+                    # Find best matching explored page for this iframe URL
                     matched = None
-                    for cloned_url, info in url_to_page.items():
+                    for explored_url, info in url_to_page.items():
                         # Match by URL containment or path equality
-                        if absolute_src in cloned_url or cloned_url in absolute_src:
+                        if absolute_src in explored_url or explored_url in absolute_src:
                             # Prefer exact match or closest path
-                            if matched is None or abs(len(cloned_url) - len(absolute_src)) < abs(len(matched["url"]) - len(absolute_src)):
-                                matched = {"url": cloned_url, **info}
+                            if matched is None or abs(len(explored_url) - len(absolute_src)) < abs(len(matched["url"]) - len(absolute_src)):
+                                matched = {"url": explored_url, **info}
                     
                     route_map.append({
                         "container_dir": page_dir.name,
@@ -1762,14 +1762,14 @@ class AgentOrchestrator:
     async def _finalize(self):
         """Generate manifest, index, and network session report."""
         manifest = {
-            "cloned_at": str(asyncio.get_event_loop().time()),
+            "explored_at": str(asyncio.get_event_loop().time()),
             "total_pages": len(self.state.completed_urls),
-            "total_assets": len(self.cloner.downloaded_assets),
+            "total_assets": len(self.explorer.downloaded_assets),
             "pages": self.state.completed_urls,
             "blocked": [b["url"] for b in self.state.blocked_urls],
             "skipped": self.state.skipped_urls,
             "assets": {url: str(path.relative_to(self.output_dir)).replace("\\", "/")
-                      for url, path in self.cloner.downloaded_assets.items()},
+                      for url, path in self.explorer.downloaded_assets.items()},
         }
         manifest_path = self.output_dir / "weblica-manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -1786,17 +1786,17 @@ class AgentOrchestrator:
         
         await self._generate_navigation()
         await self._build_iframe_route_map()
-        await self.cloner._generate_index_html()
-        print(f"[ORCH] DFS clone complete. Visited: {len(self.state.visited_urls)}, Completed: {len(self.state.completed_urls)}, Blocked: {len(self.state.blocked_urls)}, Skipped: {len(self.state.skipped_urls)}")
+        await self.explorer._generate_index_html()
+        print(f"[ORCH] DFS explore complete. Visited: {len(self.state.visited_urls)}, Completed: {len(self.state.completed_urls)}, Blocked: {len(self.state.blocked_urls)}, Skipped: {len(self.state.skipped_urls)}")
 
     def get_summary(self) -> str:
-        """Get a human-readable summary of the clone state."""
+        """Get a human-readable summary of the explored site state."""
         if not self.state:
             return "No state initialized."
         
         lines = [
             "=" * 50,
-            "Clone Job Summary",
+            "Explore Job Summary",
             "=" * 50,
             f"Start URL: {self.state.start_url}",
             f"Max Depth: {self.state.max_depth}",

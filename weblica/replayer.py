@@ -2,7 +2,7 @@
 WebReplayer - Local Replay and Testing Engine
 
 Provides:
-- Local HTTP server for cloned sites
+- Local HTTP server for explored sites
 - Hot-reload during development
 - Screenshot comparison (before/after)
 - Interaction recording and playback
@@ -43,24 +43,24 @@ class ReplaySession:
 
 class WebReplayer:
     """
-    Replays cloned web applications locally and provides testing utilities.
+    Replays explored web applications locally and provides testing utilities.
     """
 
-    def __init__(self, clone_dir: str = "./cloned", port: int = 8080):
-        self.clone_dir = Path(clone_dir)
+    def __init__(self, explore_dir: str = "./explored", port: int = 8080):
+        self.explore_dir = Path(explore_dir)
         self.port = port
         self.server: Optional[web.AppRunner] = None
         self._site: Optional[web.TCPSite] = None
 
     async def start_server(self) -> str:
         """Start the local replay server."""
-        if not self.clone_dir.exists():
-            raise FileNotFoundError(f"Clone directory not found: {self.clone_dir}")
+        if not self.explore_dir.exists():
+            raise FileNotFoundError(f"Explore directory not found: {self.explore_dir}")
 
         app = web.Application()
         
-        # Serve cloned files
-        app.router.add_static("/", self.clone_dir, show_index=True)
+        # Serve explored files
+        app.router.add_static("/", self.explore_dir, show_index=True)
         
         # API endpoints
         app.router.add_get("/weblica/api/status", self._handle_status)
@@ -88,13 +88,13 @@ class WebReplayer:
         """Handle status API request."""
         return web.json_response({
             "status": "running",
-            "clone_dir": str(self.clone_dir),
+            "explore_dir": str(self.explore_dir),
             "timestamp": datetime.now().isoformat(),
         })
 
     async def _handle_manifest(self, request: web.Request) -> web.Response:
         """Handle manifest API request."""
-        manifest_path = self.clone_dir / "weblica-manifest.json"
+        manifest_path = self.explore_dir / "weblica-manifest.json"
         if manifest_path.exists():
             data = json.loads(manifest_path.read_text(encoding="utf-8"))
             return web.json_response(data)
@@ -125,18 +125,18 @@ class WebReplayer:
     async def compare_visual(
         self,
         original_url: str,
-        clone_url: Optional[str] = None,
+        explored_url: Optional[str] = None,
         output_dir: str = "./comparison",
     ) -> Dict[str, Path]:
         """
-        Compare visual appearance between original and clone.
+        Compare visual appearance between original and explored site.
         
-        Returns paths to original screenshot, clone screenshot, and diff image.
+        Returns paths to original screenshot, explored screenshot, and diff image.
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        clone_url = clone_url or f"http://localhost:{self.port}/index.html"
+        explored_url = explored_url or f"http://localhost:{self.port}/index.html"
         
         # Take screenshots
         original_shot = await self.take_screenshot(
@@ -144,9 +144,9 @@ class WebReplayer:
             output_path=output_dir / "original.png"
         )
         
-        clone_shot = await self.take_screenshot(
-            clone_url,
-            output_path=output_dir / "clone.png"
+        explored_shot = await self.take_screenshot(
+            explored_url,
+            output_path=output_dir / "explored.png"
         )
         
         # Try to create diff using PIL if available
@@ -155,7 +155,7 @@ class WebReplayer:
             from PIL import Image, ImageChops
             
             img1 = Image.open(original_shot).convert("RGB")
-            img2 = Image.open(clone_shot).convert("RGB")
+            img2 = Image.open(explored_shot).convert("RGB")
             
             # Resize to same dimensions
             if img1.size != img2.size:
@@ -181,7 +181,7 @@ class WebReplayer:
         
         return {
             "original": original_shot,
-            "clone": clone_shot,
+            "explored": explored_shot,
             "diff": diff_path,
         }
 

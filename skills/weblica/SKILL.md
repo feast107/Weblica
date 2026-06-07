@@ -2,28 +2,28 @@
 
 ## Description
 
-Intelligent Web Application Cloning & Replaying Tool powered by CloakBrowser (CloakHQ patched Chromium), NetworkInterceptor (dynamic HTTP request/response capture), and AgentOrchestrator (Agent-in-the-Loop supervision).
+Intelligent Web Application Exploration & Replaying Tool powered by CloakBrowser (CloakHQ patched Chromium), NetworkInterceptor (dynamic HTTP request/response capture), and AgentOrchestrator (Agent-in-the-Loop supervision).
 
 Use this skill when you need to:
-- Clone a web application's frontend for offline analysis or local replay
+- Explore a web application's frontend for offline analysis or local replay
 - Capture and reproduce web page interactions for testing or demonstration
-- Compare a cloned site against the original for visual regression
+- Compare an explored site against the original for visual regression
 - Extract frontend assets, frameworks, and API endpoints from a target site
 - **Intercept and record all dynamic API calls** triggered by page navigation and user interactions
 - **Reverse-engineer a site's API surface** without reading minified JavaScript
 - Perform stealth web crawling that bypasses basic anti-bot detection
-- Clone sites that require authentication via human-in-the-loop cooperation
+- Explore sites that require authentication via human-in-the-loop cooperation
 
 ## When to Use
 
 Trigger this skill when the user requests any of the following:
-- "Clone this website" / "Copy this web app" / "Download this site"
-- "Replay this web app locally" / "Host this cloned site"
+- "Explore this website" / "Analyze this web app" / "Map this site"
+- "Replay this web app locally" / "Host this explored site"
 - "Record interactions on this page" / "Automate clicking through this site"
-- "Compare the clone with the original" / "Screenshot diff"
+- "Compare the explored site with the original" / "Screenshot diff"
 - "Analyze what frameworks this site uses" / "Extract frontend assets"
-- "Clone a site that requires login" / "Clone behind authentication"
-- Any request involving `weblica`, `CloakBrowser`, `playwright clone`, `stealth crawl`
+- "Explore a site that requires login" / "Explore behind authentication"
+- Any request involving `weblica`, `CloakBrowser`, `playwright explore`, `stealth crawl`
 
 ## When NOT to Use
 
@@ -31,7 +31,7 @@ Do NOT use this skill for:
 - General web scraping of data/tables (use dedicated scraping tools instead)
 - Backend API testing without a browser context
 - Penetration testing or attacking sites without explicit authorization
-- Cloning sites the user does not own or have permission to clone
+- Exploring sites the user does not own or have permission to explore
 
 ## Environment Requirements
 
@@ -60,15 +60,15 @@ If browser is missing, run: `playwright install chromium`
 
 ## Commands Reference
 
-### 1. Clone a Website
+### 1. Explore a Website
 
 ```bash
-python -m weblica clone <URL> [OPTIONS]
+python -m weblica explore <URL> [OPTIONS]
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `-o, --output` | `./cloned` | Output directory |
+| `-o, --output` | `./explored` | Output directory |
 | `--headless` | `True` | Run headless (set `--no-headless` to show browser) |
 | `-d, --depth` | `1` | Max crawl depth (0 = single page, 2 = deep crawl) |
 | `--proxy` | none | Proxy URL, e.g. `http://127.0.0.1:7890` |
@@ -78,7 +78,7 @@ python -m weblica clone <URL> [OPTIONS]
 | `--agent-mode` | `False` | Enable Agent-in-the-Loop supervision (BFS, pause at obstacles) |
 | `--agent-stepped` | `False` | Start in STEPPED mode: agent approves every atomic action |
 
-**Authentication options for `clone`:**
+**Authentication options for `explore`:**
 
 | Option | Description |
 |--------|-------------|
@@ -120,7 +120,7 @@ python -m weblica clone <URL> [OPTIONS]
 │       └── snapshots.json     # DOM before/after for interactive operations (click, scroll, etc.)
 ├── navigation.json            # Site-wide page tree: parent→children, depth groups
 ├── iframe_route_map.json      # iframe routing map: container page → iframe src → matched content page
-├── weblica-manifest.json      # Clone metadata
+├── weblica-manifest.json      # Explore metadata
 ├── weblica-session.json       # Complete session recording (all operations + traffic)
 ├── weblica-index.html         # Browsable index page
 └── .weblica-state.json        # Resume state for AgentOrchestrator
@@ -134,12 +134,12 @@ python -m weblica replay [OPTIONS]
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `-d, --dir` | `./cloned` | Clone directory to serve |
+| `-d, --dir` | `./explored` | Explore directory to serve |
 | `-p, --port` | `8080` | HTTP server port |
 
 **Agent note:** Start this in background if the user wants to continue working:
 ```bash
-python -m weblica replay -d ./cloned -p 8080
+python -m weblica replay -d ./explored -p 8080
 # Then access http://localhost:8080/weblica-index.html
 ```
 
@@ -162,10 +162,10 @@ python -m weblica compare <URL> [OPTIONS]
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `-d, --dir` | `./cloned` | Clone directory |
+| `-d, --dir` | `./explored` | Explore directory |
 | `-o, --output` | `./comparison` | Output dir for screenshots |
 
-Produces: `original.png`, `clone.png`, `diff.png` (if Pillow available)
+Produces: `original.png`, `explored.png`, `diff.png` (if Pillow available)
 
 ## Python API Reference
 
@@ -173,7 +173,7 @@ For programmatic control within agent workflows:
 
 ```python
 import asyncio
-from weblica import WebCloner, WebReplayer
+from weblica import WebExplorer, WebReplayer
 from weblica.orchestrator import AgentOrchestrator, DecisionContext, ObstacleType
 
 async def smart_agent(ctx: DecisionContext) -> DecisionContext:
@@ -209,7 +209,7 @@ async def smart_agent(ctx: DecisionContext) -> DecisionContext:
 async def workflow():
     async with AgentOrchestrator(
         start_url="https://example.com",
-        output_dir="./cloned",
+        output_dir="./explored",
         max_depth=2,
         agent_mode="supervised",   # "supervised" or "stepped"
         decision_callback=smart_agent,
@@ -222,7 +222,7 @@ async def workflow():
 
 ### Key Classes
 
-**`AgentOrchestrator`** — Hybrid-mode Agent-in-the-Loop cloning engine
+**`AgentOrchestrator`** — Hybrid-mode Agent-in-the-Loop exploration engine
 - `async run_dfs()` — Generator yielding DecisionContext at 6 checkpoints:
   - **A**: Post-navigation (STEPPED only)
   - **B**: Obstacle detected (both modes)
@@ -245,14 +245,14 @@ async def workflow():
 - Browser page is KEPT OPEN when obstacles are detected
 - State persisted to `.weblica-state.json` after each page
 
-**`WebCloner`** — Main batch cloning engine
-- `async clone(url: str) -> Path` — Start cloning
+**`WebExplorer`** — Main batch exploration engine
+- `async explore(url: str) -> Path` — Start exploring
 - `output_dir`, `headless`, `max_depth`, `proxy` — Config via constructor
 
 **`WebReplayer`** — Local replay and testing
 - `async start_server() -> str` — Returns server URL
 - `async stop_server()` — Clean shutdown
-- `async compare_visual(original_url, clone_url, output_dir) -> dict`
+- `async compare_visual(original_url, explored_url, output_dir) -> dict`
 - `async record_interactions(url, duration) -> ReplaySession`
 - `async replay_interactions(session, target_url)`
 
@@ -285,18 +285,18 @@ async def workflow():
 
 ## Standard Workflows
 
-### Workflow A: Agent-in-the-Loop Clone → Replay → Compare (Recommended)
+### Workflow A: Agent-in-the-Loop Explore → Replay → Compare (Recommended)
 
-Use when user wants a full clone with agent supervision.
+Use when user wants a full explore with agent supervision.
 
 ```
-1. python -m weblica clone <URL> -o ./cloned --depth 2 --agent-mode
+1. python -m weblica explore <URL> -o ./explored --depth 2 --agent-mode
    # Or stepped mode for full control: --agent-mode --agent-stepped
 2. Agent reviews decision contexts at each obstacle/completed page
 3. Read analysis/page_*/index.json for overview, then deep-dive into category files
 4. Read weblica-session.json for complete API call chains
-5. python -m weblica compare <URL> -d ./cloned -o ./comparison
-6. python -m weblica replay -d ./cloned -p 8080
+5. python -m weblica compare <URL> -d ./explored -o ./comparison
+6. python -m weblica replay -d ./explored -p 8080
 ```
 
 **Analyzing captured API traffic:**
@@ -304,7 +304,7 @@ Use when user wants a full clone with agent supervision.
 import json
 
 # Load session report
-with open("cloned/weblica-session.json") as f:
+with open("explored/weblica-session.json") as f:
     session = json.load(f)
 
 # Print all API calls with response bodies
@@ -327,19 +327,19 @@ for op in session["operations"]:
             print(f"    Response body preview: {api['response']['body'][:200]}...")
 ```
 
-### Workflow E: Human-in-the-Loop Authenticated Clone (NEW)
+### Workflow E: Human-in-the-Loop Authenticated Explore (NEW)
 
 Use when the target requires login and user can interact with browser.
 
-**This is the MOST RELIABLE way to clone authenticated sites.**
+**This is the MOST RELIABLE way to explore authenticated sites.**
 
 ```
-1. python -m weblica clone <URL> -o ./cloned --depth 2 --agent-mode --no-headless
+1. python -m weblica explore <URL> -o ./explored --depth 2 --agent-mode --no-headless
 2. Orchestrator detects login page → browser window STAYS OPEN
 3. Tell user: "Please complete login in the browser window"
 4. Orchestrator polls page state with _wait_for_browser_login()
 5. Login detected automatically → BFS continues with authenticated session
-6. All subsequent pages are cloned with the login session
+6. All subsequent pages are explored with the login session
 ```
 
 **How it works internally:**
@@ -353,23 +353,23 @@ Use when the target requires login and user can interact with browser.
   - Page navigation after form submit
 - Upon detection, `_process_page_phase2()` analyzes and saves the page
 
-### Workflow D: Authenticated Clone (Traditional Methods)
+### Workflow D: Authenticated Explore (Traditional Methods)
 
 Use when user has cookies or tokens ready.
 
 **Option 1: Cookie injection**
 ```
-python -m weblica clone <URL> -o ./cloned --cookies ./cookies.json
+python -m weblica explore <URL> -o ./explored --cookies ./cookies.json
 ```
 
 **Option 2: Bearer token**
 ```
-python -m weblica clone <URL> -o ./cloned --bearer-token <TOKEN>
+python -m weblica explore <URL> -o ./explored --bearer-token <TOKEN>
 ```
 
 **Option 3: Reuse saved auth state**
 ```
-python -m weblica clone <URL> -o ./cloned --auth-state-file ./weblica-auth-state.json
+python -m weblica explore <URL> -o ./explored --auth-state-file ./weblica-auth-state.json
 ```
 
 ### Workflow B: Deep Crawl with Analysis
@@ -377,7 +377,7 @@ python -m weblica clone <URL> -o ./cloned --auth-state-file ./weblica-auth-state
 Use when user wants to understand site architecture.
 
 ```
-1. python -m weblica clone <URL> -o ./cloned --depth 2 --agent-mode
+1. python -m weblica explore <URL> -o ./explored --depth 2 --agent-mode
 2. Read navigation.json for site structure and page hierarchy
 3. Read analysis/page_001/index.json for overview (note parent_url, depth)
 4. Read analysis/page_001/metadata.json for frameworks
@@ -387,13 +387,13 @@ Use when user wants to understand site architecture.
 8. Read weblica-manifest.json for asset inventory
 ```
 
-### Workflow C: Interaction Recording → Replay on Clone
+### Workflow C: Interaction Recording → Replay on Explored Site
 
-Use when user wants to test if cloned site supports the same interactions.
+Use when user wants to test if explored site supports the same interactions.
 
 ```
 1. python -m weblica record <URL> --duration 30 -o session.json
-2. python -m weblica replay -d ./cloned -p 8080
+2. python -m weblica replay -d ./explored -p 8080
 3. (Python API) Load session and replay on http://localhost:8080/index.html
 ```
 
@@ -405,7 +405,7 @@ The orchestrator supports two granularity levels, and the agent can switch dynam
 
 | Mode | Granularity | Yield Points | Use When |
 |------|-------------|--------------|----------|
-| **SUPERVISED** | Per-page | Checkpoints B (obstacles) and F (queue decision) | Most clones — fast, agent reviews results |
+| **SUPERVISED** | Per-page | Checkpoints B (obstacles) and F (queue decision) | Most exploration jobs — fast, agent reviews results |
 | **STEPPED** | Per-action | Checkpoints A, B, C, D, E, F | Complex pages requiring precise interaction |
 
 **Dynamic switching:** The agent can `switch_mode` at any checkpoint:
@@ -426,7 +426,7 @@ When in STEPPED mode, the agent can instruct these atomic operations at checkpoi
 | `screenshot` | `path` | Capture page screenshot |
 | `continue` | — | Proceed to next checkpoint |
 | `skip` | — | Skip current page |
-| `abort` | — | Stop entire clone job |
+| `abort` | — | Stop entire exploration job |
 | `switch_mode` | `mode`, `after_switch` | Toggle SUPERVISED/STEPPED |
 
 **Checkpoint F (Queue Decision) actions:**
@@ -475,9 +475,9 @@ When in STEPPED mode, the agent can instruct these atomic operations at checkpoi
 
 ### During Execution
 
-1. **Clone output is verbose:** The tool prints progress lines. Capture stderr/stdout to show the user.
+1. **Explore output is verbose:** The tool prints progress lines. Capture stderr/stdout to show the user.
 2. **Headless by default:** Use `--no-headless` only when debugging or if the user needs to see the browser.
-3. **Proxy support:** If the user is in a restricted network, ask if they need a proxy before cloning.
+3. **Proxy support:** If the user is in a restricted network, ask if they need a proxy before exploring.
 4. **Authentication:** If the target requires login, recommend **Workflow E** (human-in-the-loop with `--agent-mode --no-headless`):
    - It is more reliable than `--wait-login` because the page stays open
    - The orchestrator detects login success automatically
@@ -487,10 +487,10 @@ When in STEPPED mode, the agent can instruct these atomic operations at checkpoi
 ### After Execution
 
 1. **Always report the output directory path.**
-2. **Mention key findings:** Number of pages cloned, number of assets, detected frameworks (from analysis JSON).
+2. **Mention key findings:** Number of pages explored, number of assets, detected frameworks (from analysis JSON).
 3. **For replay:** Provide the exact localhost URL to open.
 4. **For comparison:** Report visual diff percentage and show image paths.
-5. **For authenticated clones:** Note that the clone captured the post-login state.
+5. **For authenticated explores:** Note that the exploration captured the post-login state.
 
 ### Error Handling
 
@@ -507,7 +507,7 @@ When in STEPPED mode, the agent can instruct these atomic operations at checkpoi
 
 ### `analysis/page_NNN/` directory
 
-Each cloned page gets its own directory with split category files:
+Each explored page gets its own directory with split category files:
 
 **`index.json`** — Quick overview + navigation context
 - `page_index`, `url`, `title`, `depth` (BFS depth), `parent_url` (where this page was discovered from)
@@ -518,7 +518,7 @@ Each cloned page gets its own directory with split category files:
 - `url`, `title`, `description`, `meta_tags`, `favicon`, `frameworks`
 
 **`dom.html`** — Complete page HTML (open directly in browser)
-- Full `document.documentElement.outerHTML` snapshot at clone time
+- Full `document.documentElement.outerHTML` snapshot at explore time
 - Use this to understand the visual structure and extract templates
 
 **`assets.json`** — Asset inventory
@@ -549,7 +549,7 @@ Each cloned page gets its own directory with split category files:
 **`iframe_meta.json`** — iframe metadata per page (NEW)
 - Array of iframe descriptors: `index`, `src`, `actual_url`, `name`, `id`, `html_length`, `method` (`frame_evaluate` or `contentDocument_fallback`)
 - Includes error entries for cross-origin frames that could not be accessed
-- Use this to understand which content is loaded inside iframes and whether it matches another cloned page
+- Use this to understand which content is loaded inside iframes and whether it matches another explored page
 
 ### `navigation.json` (root directory) — Site-wide page tree (NEW)
 - `pages` — Flat list of all pages with `page_index`, `url`, `title`, `depth`, `parent_url`
@@ -561,14 +561,14 @@ Each cloned page gets its own directory with split category files:
 ### `iframe_route_map.json` (root directory) — iframe routing map (NEW)
 - Array of route entries mapping container pages to their iframe content
 - Each entry: `container_dir`, `container_url`, `container_title`, `iframe_src`, `iframe_absolute_url`, `matched_content_page`
-- `matched_content_page` links to the standalone cloned page that corresponds to the iframe URL (if found)
+- `matched_content_page` links to the standalone explored page that corresponds to the iframe URL (if found)
 - **Critical for iframe-based architectures** (e.g., AdminLTE with tab-iframes): reveals how the outer shell routes to inner content
 
 ### `weblica-manifest.json`
 
-Clone metadata:
+Explore metadata:
 - `total_pages`, `total_assets`
-- `pages` — List of all cloned URLs
+- `pages` — List of all explored URLs
 - `blocked` — URLs that required manual intervention
 - `skipped` — URLs agent chose to skip
 - `assets` — Map of original URL → local relative path
@@ -578,16 +578,16 @@ Clone metadata:
 AgentOrchestrator resume state:
 - `visited_urls`, `completed_urls`, `blocked_urls`, `skipped_urls`
 - `url_queue` — Remaining pages to crawl
-- Allows safe interruption and resumption of clone jobs
+- Allows safe interruption and resumption of exploration jobs
 
 ## Best Practices
 
-- **Agent-mode is recommended for most clones.** It provides supervision, obstacle detection, and human-in-the-loop support.
-- **Single-page clones** are most reliable. Deep crawling may hit rate limits or anti-bot measures.
-- **SPA (React/Vue/Angular)** clones capture the hydrated DOM but dynamic data from APIs will be frozen at clone-time state.
-- **Large sites:** Clone depth 1 first, inspect results, then decide if deeper crawling is needed.
+- **Agent-mode is recommended for most exploration jobs.** It provides supervision, obstacle detection, and human-in-the-loop support.
+- **Single-page exploration** is most reliable. Deep crawling may hit rate limits or anti-bot measures.
+- **SPA (React/Vue/Angular)** exploration captures the hydrated DOM but dynamic data from APIs will be frozen at explore-time state.
+- **Large sites:** Explore depth 1 first, inspect results, then decide if deeper crawling is needed.
 - **Stealth:** CloakBrowser handles basic detection, but advanced WAFs (Cloudflare, Akamai) may still challenge automation. In such cases, use `--agent-mode --no-headless` for manual intervention.
-- **Auth state reuse:** After a successful `--agent-mode --no-headless` run with login, the `.weblica-state.json` preserves the clone progress. The browser cookies from the session are also preserved in the context.
+- **Auth state reuse:** After a successful `--agent-mode --no-headless` run with login, the `.weblica-state.json` preserves the exploration progress. The browser cookies from the session are also preserved in the context.
 
 ## Dependencies
 

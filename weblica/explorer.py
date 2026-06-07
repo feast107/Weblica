@@ -1,7 +1,7 @@
 """
-WebCloner - Intelligent Web Application Cloning Engine
+WebExplorer - Intelligent Web Application Exploration Engine
 
-Clones web applications by:
+Explores web applications by:
 1. Stealth browsing with CloakBrowser
 2. Deep page analysis with SmartAnalyzer
 3. Asset downloading and organization
@@ -24,14 +24,14 @@ from .analyzer import SmartAnalyzer, PageAnalysis, AssetInfo
 from .auth import AuthManager, AuthConfig
 
 
-class WebCloner:
+class WebExplorer:
     """
-    Main cloning engine that orchestrates the entire cloning process.
+    Main exploration engine that orchestrates the entire exploration process.
     """
 
     def __init__(
         self,
-        output_dir: str = "./cloned",
+        output_dir: str = "./explored",
         headless: bool = True,
         max_depth: int = 1,
         proxy: Optional[str] = None,
@@ -80,17 +80,17 @@ class WebCloner:
         if self.browser:
             await self.browser.close()
 
-    async def clone(self, url: str) -> Path:
+    async def explore(self, url: str) -> Path:
         """
-        Clone a web application starting from the given URL.
+        Explore a web application starting from the given URL.
         
         Args:
-            url: Target URL to clone
+            url: Target URL to explore
             
         Returns:
-            Path to the output directory containing the cloned site
+            Path to the output directory containing the explored site
         """
-        print(f"[CLONE] Starting clone of {url}")
+        print(f"[EXPLORE] Starting exploration of {url}")
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         # Create asset directories
@@ -98,11 +98,11 @@ class WebCloner:
         for subdir in ["css", "js", "images", "fonts", "api"]:
             (assets_dir / subdir).mkdir(parents=True, exist_ok=True)
         
-        # Start BFS cloning
+        # Start BFS exploration
         queue = [(url, 0)]
         while queue:
             current_url, depth = queue.pop(0)  # BFS: FIFO
-            links = await self._clone_page(current_url, depth)
+            links = await self._explore_page(current_url, depth)
             if links and depth < self.max_depth:
                 queue.extend([(link, depth + 1) for link in links])
         
@@ -110,11 +110,11 @@ class WebCloner:
         await self._generate_manifest()
         await self._generate_index_html()
         
-        print(f"[DONE] Clone complete! Output: {self.output_dir.absolute()}")
+        print(f"[DONE] Explore complete! Output: {self.output_dir.absolute()}")
         return self.output_dir
 
-    async def _clone_page(self, url: str, depth: int = 0):
-        """Clone a single page and its assets."""
+    async def _explore_page(self, url: str, depth: int = 0):
+        """Explore a single page and its assets."""
         if url in self.visited_urls or depth > self.max_depth:
             return
         
@@ -140,7 +140,7 @@ class WebCloner:
             if self.auth_manager and depth == 0:
                 captcha_ok = await self.auth_manager.handle_captcha(page)
                 if not captcha_ok:
-                    print("[AUTH] Clone aborted due to CAPTCHA")
+                    print("[AUTH] Explore aborted due to CAPTCHA")
                     return
             
             # Handle manual login if configured (only on first page)
@@ -185,7 +185,7 @@ class WebCloner:
                     print(f"    [FILTER] Skipped {skipped} dangerous link(s) (logout/signout)")
                     
         except Exception as e:
-            print(f"    [ERR] Error cloning {url}: {e}")
+            print(f"    [ERR] Error exploring {url}: {e}")
         finally:
             await page.close()
         
@@ -297,7 +297,7 @@ class WebCloner:
         return html
 
     def _get_page_filename(self, url: str) -> str:
-        """Generate a filename for the cloned page."""
+        """Generate a filename for the explored page."""
         parsed = urlparse(url)
         path = parsed.path.strip("/")
         
@@ -312,9 +312,9 @@ class WebCloner:
         return safe_path
 
     async def _generate_manifest(self):
-        """Generate a manifest file with clone metadata."""
+        """Generate a manifest file with exploration metadata."""
         manifest = {
-            "cloned_at": str(asyncio.get_event_loop().time()),
+            "explored_at": str(asyncio.get_event_loop().time()),
             "total_pages": len(self.visited_urls),
             "total_assets": len(self.downloaded_assets),
             "pages": list(self.visited_urls),
@@ -326,7 +326,7 @@ class WebCloner:
         manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
     async def _generate_index_html(self):
-        """Generate a browsable index page for the clone."""
+        """Generate a browsable index page for the explored site."""
         pages_html = "\n".join(
             f'<li><a href="{self._get_page_filename(url)}">{url}</a></li>'
             for url in sorted(self.visited_urls)
@@ -343,7 +343,7 @@ class WebCloner:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Weblica Clone Index</title>
+    <title>Weblica Explore Index</title>
     <style>
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -382,7 +382,7 @@ class WebCloner:
     </style>
 </head>
 <body>
-    <h1>Weblica Clone Index</h1>
+    <h1>Weblica Explore Index</h1>
     <p>智能克隆结果浏览页</p>
     
     <div class="stats">
@@ -400,7 +400,7 @@ class WebCloner:
     <ul>{pages_html}</ul>
     
     <footer style="margin-top: 50px; padding-top: 20px; border-top: 1px solid #334155; color: #64748b;">
-        Generated by Weblica - Intelligent Web Cloner
+        Generated by Weblica - Intelligent Web Explorer
     </footer>
 </body>
 </html>"""
