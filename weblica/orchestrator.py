@@ -359,6 +359,9 @@ class AgentOrchestrator:
 
         elif action == "click":
             selector = target
+            pre_wait = params.get("pre_wait", 0)
+            if pre_wait:
+                await asyncio.sleep(pre_wait / 1000)
             if selector:
                 try:
                     await page.click(selector)
