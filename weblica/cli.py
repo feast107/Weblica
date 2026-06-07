@@ -210,6 +210,19 @@ Examples:
     return parser
 
 
+async def auto_continue_callback(ctx: DecisionContext) -> DecisionContext:
+    """
+    Auto-continue callback for standard (non-interactive) mode.
+    Automatically skips pages requiring login, otherwise proceeds.
+    """
+    if ctx.obstacle == ObstacleType.LOGIN_REQUIRED:
+        ctx.recommended_action = "skip"
+        ctx.notes = "Auto-skipped: login required in non-interactive mode"
+    else:
+        ctx.recommended_action = "continue"
+    return ctx
+
+
 async def default_agent_callback(ctx: DecisionContext) -> DecisionContext:
     """
     Default agent callback for hybrid-mode orchestrator.
@@ -390,18 +403,21 @@ async def handle_clone(args):
             print(orch.get_summary())
         return
     
-    # Standard mode uses batch cloner
-    async with WebCloner(
+    # Standard mode: use AgentOrchestrator with auto-continue for consistent output format
+    async with AgentOrchestrator(
+        start_url=args.url,
         output_dir=args.output,
-        headless=headless,
         max_depth=args.depth,
+        headless=headless,
         proxy=args.proxy,
         auth_manager=auth_manager,
+        decision_callback=auto_continue_callback,
         humanize=not args.no_humanize,
-    ) as cloner:
-        if args.slow_mo:
-            cloner.browser.slow_mo = args.slow_mo
-        await cloner.clone(args.url)
+        agent_mode="supervised",
+    ) as orch:
+        async for ctx in orch.run_dfs():
+            pass
+        print(orch.get_summary())
 
 
 async def handle_replay(args):
