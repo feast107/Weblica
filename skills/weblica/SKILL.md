@@ -75,7 +75,7 @@ python -m weblica clone <URL> [OPTIONS]
 | `--slow-mo` | none | Slow down by N ms for debugging |
 | `--humanize` | `True` | Human-like mouse/keyboard/scroll behavior (CloakBrowser mode) |
 | `--no-humanize` | `False` | Disable human-like behavior (faster, less stealthy) |
-| `--agent-mode` | `False` | Enable Agent-in-the-Loop supervision (DFS, pause at obstacles) |
+| `--agent-mode` | `False` | Enable Agent-in-the-Loop supervision (BFS, pause at obstacles) |
 | `--agent-stepped` | `False` | Start in STEPPED mode: agent approves every atomic action |
 
 **Authentication options for `clone`:**
@@ -198,9 +198,8 @@ async def smart_agent(ctx: DecisionContext) -> DecisionContext:
 
     # SUPERVISED mode: review at page completion
     if ctx.phase.name == "COMPLETED":
-        dashboard_links = [l for l in ctx.discovered_links if "dashboard" in l]
-        if dashboard_links:
-            ctx.action_params["filter"] = dashboard_links
+        # Category-based filtering: only queue sidebar navigation links
+        ctx.action_params["include_categories"] = ["sidebar_menu"]
         ctx.recommended_action = "continue"
         return ctx
 
@@ -333,7 +332,7 @@ Use when the target requires login and user can interact with browser.
 2. Orchestrator detects login page → browser window STAYS OPEN
 3. Tell user: "Please complete login in the browser window"
 4. Orchestrator polls page state with _wait_for_browser_login()
-5. Login detected automatically → DFS continues with authenticated session
+5. Login detected automatically → BFS continues with authenticated session
 6. All subsequent pages are cloned with the login session
 ```
 
@@ -425,8 +424,42 @@ When in STEPPED mode, the agent can instruct these atomic operations at checkpoi
 | `switch_mode` | `mode`, `after_switch` | Toggle SUPERVISED/STEPPED |
 
 **Checkpoint F (Queue Decision) actions:**
-- `continue` — Queue discovered links normally
+- `continue` — Queue discovered links normally (subject to MAX_QUEUE_LINKS=30 safety limit)
 - `filter_links` — Provide `filter: [...]` or `exclude: [...]` in `action_params` to control which links are queued
+- `filter_links` with `include_categories` — Provide `include_categories: ["sidebar_menu"]` to queue only links from specific categories (sidebar_menu, toolbar, pagination, content)
+
+**Checkpoint F observation structure (available to agent):**
+```json
+{
+  "page_summary": {
+    "title": "Dashboard",
+    "url": "https://example.com/admin",
+    "depth": 1,
+    "total_links": 45,
+    "links_summary": {
+      "by_category": {"sidebar_menu": 17, "toolbar": 3, "pagination": 20, "content": 5},
+      "samples": {
+        "sidebar_menu": [{"text": "Articles", "href": "...", "selector": "a.nav-link"}]
+      }
+    },
+    "has_iframe": true,
+    "interactive_elements": {"buttons": 4, "inputs": 7, "forms": 1}
+  },
+  "file_references": {
+    "dom_html": "analysis/page_002/dom.html",
+    "iframe_html": "analysis/page_002/iframe_00.html",
+    "interactions_json": "analysis/page_002/interactions.json",
+    "network_json": "analysis/page_002/network.json",
+    "screenshot_png": "analysis/page_002/screenshot.png"
+  },
+  "queue_size": 0,
+  "current_depth": 1,
+  "discovered_links": ["https://example.com/admin/articles", "..."]
+}
+```
+- `page_summary.links_summary` — Categorized link counts and representative samples (max 8 per category)
+- `file_references` — Paths to saved analysis files on disk for deep inspection
+- **Agent strategy:** Read `page_summary` for quick decisions; read `file_references.*` for deep analysis when needed
 
 ### Before Running
 
@@ -471,7 +504,7 @@ When in STEPPED mode, the agent can instruct these atomic operations at checkpoi
 Each cloned page gets its own directory with split category files:
 
 **`index.json`** — Quick overview + navigation context
-- `page_index`, `url`, `title`, `depth` (DFS depth), `parent_url` (where this page was discovered from)
+- `page_index`, `url`, `title`, `depth` (BFS depth), `parent_url` (where this page was discovered from)
 - `assets_count`, `links_count`, `forms_count`, `api_calls_count`
 - `files` — manifest pointing to other files in the directory
 

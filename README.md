@@ -45,7 +45,7 @@ python -m weblica compare <TARGET_URL> -d ./cloned -o ./comparison
 - **📸 页面截图** — 每个克隆页面保存 `screenshot.png`（完整页面截图），便于视觉验证与对比
 - **🖼️ iframe 内容捕获** — 自动提取并保存页面内所有非主框架 iframe 的 HTML 内容（`iframe_00.html`、`iframe_01.html`…）
 - **🔓 SSL 证书跳过** — 资源下载自动忽略 SSL 验证错误，支持证书不匹配或自签名证书的站点
-- **🤖 Agent-in-the-Loop 编排 (AgentOrchestrator)** — 深度优先遍历，每个页面都是决策单元。Agent 在每个障碍点介入分析，用户可在浏览器中手动解决登录/验证码后自动接管继续
+- **🤖 Agent-in-the-Loop 编排 (AgentOrchestrator)** — 广度优先遍历，每个页面都是决策单元。Agent 在每个障碍点介入分析，支持按链接类别（sidebar、toolbar、pagination）智能过滤，用户可在浏览器中手动解决登录/验证码后自动接管继续
 - **🔄 人机协作克隆** — 浏览器窗口在遇到登录页时**保持打开**，用户完成登录后工具自动检测并继续后续深度克隆
 - **📦 深度爬取** — 支持多级页面递归克隆，自动下载并重写静态资源引用为本地路径
 - **🖥️ 本地复现 (WebReplayer)** — 一键启动本地 HTTP 服务器浏览克隆结果，支持热重载
@@ -66,7 +66,7 @@ python -m weblica compare <TARGET_URL> -d ./cloned -o ./comparison
 │ CloakBrowser│ SmartAnalyzer│ NetworkInterceptor│ AgentOrchestrator   │ WebReplayer         │
 │  (隐蔽浏览器) │  (智能分析器)  │  (网络拦截器)      │  (Agent编排引擎)     │  (复现服务器)        │
 ├─────────────┼─────────────┼─────────────────┼───────────────────┼─────────────────────┤
-│ • CloakHQ   │ • DOM 结构   │ • 请求/响应监听  │ • DFS 深度优先     │ • 本地 HTTP 服务     │
+│ • CloakHQ   │ • DOM 结构   │ • 请求/响应监听  │ • BFS 广度优先     │ • 本地 HTTP 服务     │
 │   补丁内核   │ • 资源提取   │ • 自动交互触发   │ • 障碍点 Agent 介入 │ • 截图对比          │
 │ • UA 轮换    │ • 框架检测   │ • API 调用链记录 │ • 浏览器持久化      │ • 交互录制回放       │
 │ • WebDriver  │ • API 发现   │ • Session 回放   │ • 登录自动检测      │                     │
@@ -86,8 +86,8 @@ python -m weblica compare <TARGET_URL> -d ./cloned -o ./comparison
 
 ```
 ┌─────────────┐     加载页面      ┌─────────────┐
-│   DFS 遍历   │ ───────────────► │  Phase 1    │
-│  (深度优先)  │                  │ 导航+障碍检测 │
+│   BFS 遍历   │ ───────────────► │  Phase 1    │
+│  (广度优先)  │                  │ 导航+障碍检测 │
 └─────────────┘                  └──────┬──────┘
        ▲                                │
        │         检测到障碍              ▼
@@ -297,7 +297,7 @@ python -m weblica clone https://example.com --no-humanize
 ```
 Step 1: python -m weblica clone <URL> -o ./cloned --depth 2 --agent-mode
         # 或步进模式: --agent-mode --agent-stepped
-Step 2: 工具自动执行 DFS 遍历，在检查点生成决策上下文
+Step 2: 工具自动执行 BFS 遍历，在检查点生成决策上下文
 Step 3: Agent 审查页面结果，决定哪些链接值得深入、是否需要额外交互
 Step 4: 读取 ./cloned/analysis/page_*/ 下的分析结果
 Step 5: python -m weblica compare <URL> -d ./cloned -o ./comparison
@@ -314,7 +314,7 @@ Step 7: 告知用户访问 http://localhost:8080/weblica-index.html
 Step 1: python -m weblica clone <URL> -o ./cloned --depth 2 --agent-mode --no-headless
 Step 2: 工具检测到登录页 → 浏览器窗口保持打开
 Step 3: 用户在浏览器窗口中完成登录
-Step 4: 工具轮询检测到登录成功 → 自动继续 DFS 克隆
+Step 4: 工具轮询检测到登录成功 → 自动继续 BFS 克隆
 Step 5: 全部完成后启动 replay 服务器
 
 # 传统方式：使用已有 Cookie
@@ -388,10 +388,8 @@ async def smart_agent_callback(ctx: DecisionContext) -> DecisionContext:
     
     # SUPERVISED mode: agent reviews at page completion
     if ctx.phase.name == "COMPLETED":
-        # Filter links: only follow dashboard-related pages
-        dashboard_links = [l for l in ctx.discovered_links if "dashboard" in l or "admin" in l]
-        if dashboard_links:
-            ctx.action_params["filter"] = dashboard_links
+        # Filter links by category: only follow sidebar menu links
+        ctx.action_params["include_categories"] = ["sidebar_menu"]
         ctx.recommended_action = "continue"
         return ctx
     
