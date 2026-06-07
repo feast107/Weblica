@@ -1,5 +1,5 @@
 # ============================================
-# Weblica - Intelligent Web Cloner
+# Weblica - Intelligent Web Explorer
 # Python + Playwright Project
 # ============================================
 
@@ -48,9 +48,9 @@ dmypy.json
 # --------------------------------------------
 # Weblica Runtime Output
 # --------------------------------------------
-# Default clone output directories
-cloned/
-cloned_*/
+# Default explore output directories
+explored/
+explored_*/
 
 # Visual comparison outputs
 comparison/

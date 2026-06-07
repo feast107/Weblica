@@ -171,6 +171,10 @@ Produces: `original.png`, `explored.png`, `diff.png` (if Pillow available)
 
 Weblica 可以作为**长期浏览器会话服务**运行，Agent 通过 HTTP API 远程控制浏览器。浏览器在 API 调用之间保持打开，Agent 可以随时暂停、查询状态、继续操作。
 
+> **核心理念：Agent 主动探索，不是预编排脚本。**
+> 
+> 不要写一个一次性跑完的 Python 脚本。Agent 应该在**观察 → 决策 → 行动**的循环中，根据每次 API 返回的结果决定下一步做什么。浏览器状态是实时可见的，Agent 像人类分析师一样边探索边理解。
+
 ### 启动服务
 
 ```bash
@@ -178,17 +182,27 @@ python -m weblica.api_server
 # → http://localhost:8765
 ```
 
-### Agent 工作流
+### Agent 主动探索工作流
+
+Agent 通过**反复调用 API 观察浏览器状态并做出决策**，而非预写脚本。典型循环：
 
 ```
-Step 1: POST /sessions                    → 获取 session_id
-Step 2: POST /sessions/{id}/navigate      → 导航到目标
-Step 3: POST /sessions/{id}/click         → 执行交互
-Step 4: GET  /sessions/{id}/state         → 查询当前状态（随时可调用）
-Step 5: GET  /sessions/{id}/screenshot    → 获取截图
-Step 6: GET  /sessions/{id}/interactive-elements → 获取可点击元素列表
-Step 7: POST /sessions/{id}/save          → 持久化到磁盘
-Step 8: DELETE /sessions/{id}             → 销毁
+1. POST /sessions                          → 创建会话，获取 session_id
+2. POST /sessions/{id}/navigate?url=...    → 进入目标页面
+3. GET  /sessions/{id}/interactive-elements → 观察：当前页有哪些按钮/输入框？
+   └─ Agent 决策：点击 "a.btn-add" 试试
+4. POST /sessions/{id}/click?selector=...  → 行动：点击 Add 按钮
+   └─ 返回 {"interaction_type": "dom_update"} → Agent 决策：弹出了表单
+5. GET  /sessions/{id}/interactive-elements → 观察：表单里有哪些字段？
+   └─ Agent 决策：填充 title 和 content
+6. POST /sessions/{id}/input?selector=...  → 行动：填写表单
+7. GET  /sessions/{id}/state               → 验证：状态是否正确？
+8. GET  /sessions/{id}/screenshot          → 视觉验证：页面看起来对吗？
+9. GET  /sessions/{id}/network-log         → 分析：点击触发了哪些 API？
+10. POST /sessions/{id}/save               → 关键节点持久化
+   └─ Agent 可以暂停做任何其他事，浏览器保持打开
+11. （Agent 回来继续）POST /sessions/{id}/click → 继续探索...
+12. DELETE /sessions/{id}                  → 任务完成，销毁
 ```
 
 ### 核心端点
@@ -197,13 +211,16 @@ Step 8: DELETE /sessions/{id}             → 销毁
 |------|------|---------------|
 | `POST /sessions` | 创建会话 | 开始新任务时 |
 | `POST /sessions/{id}/navigate?url=...` | 导航 | 进入新页面 |
-| `POST /sessions/{id}/click?selector=...` | 点击 | 执行交互操作 |
-| `POST /sessions/{id}/input?selector=...&value=...` | 输入 | 填写表单 |
-| `GET /sessions/{id}/state` | 状态快照 | 每次操作后检查结果 |
-| `GET /sessions/{id}/screenshot` | 截图 | 视觉验证 |
-| `GET /sessions/{id}/interactive-elements` | 可交互元素 | 决定下一步操作 |
-| `GET /sessions/{id}/network-log` | 网络日志 | 分析 API 调用 |
-| `POST /sessions/{id}/save` | 持久化 | 关键节点保存 |
+| `POST /sessions/{id}/click?selector=...` | 点击 | Agent 决定与某个元素交互 |
+| `POST /sessions/{id}/input?selector=...&value=...` | 输入 | Agent 决定填写表单字段 |
+| `POST /sessions/{id}/scroll?direction=...` | 滚动 | 页面内容未完全加载 |
+| `POST /sessions/{id}/wait?ms=...` | 等待 | Ajax 加载需要时间 |
+| `GET /sessions/{id}/state` | 状态快照 | **每次操作后检查**，决定下一步 |
+| `GET /sessions/{id}/screenshot` | 截图 | **视觉验证**，确认页面状态 |
+| `GET /sessions/{id}/interactive-elements` | 可交互元素 | **决策依据**，决定下一步 selector |
+| `GET /sessions/{id}/dom` | 当前 HTML | 需要解析 DOM 结构时 |
+| `GET /sessions/{id}/network-log` | 网络日志 | **分析 API 调用**，理解后端交互 |
+| `POST /sessions/{id}/save` | 持久化 | 关键节点保存，Agent 可安全暂停 |
 | `DELETE /sessions/{id}` | 销毁 | 任务完成 |
 
 ### 状态快照（每次操作返回）
@@ -222,14 +239,70 @@ Step 8: DELETE /sessions/{id}             → 销毁
 }
 ```
 
-**Agent 策略：**
-- 调用 `navigate` 或 `click` 后，读取返回的 `interaction_type`
-  - `"navigation"` → URL 变了，页面跳转
-  - `"dom_update"` → DOM 变化但 URL 没变（弹窗/表单出现）
-  - `"no_change"` → 无变化
-- 调用 `interactive-elements` 获取当前页面所有可点击/可输入元素，决定下一步 selector
-- 调用 `screenshot` 做视觉验证
-- 调用 `save` 在关键节点持久化，防止进程崩溃丢失进度
+**Agent 决策依据：**
+- `interaction_type` 决定下一步策略：
+  - `"navigation"` → URL 变了，需要重新 `interactive-elements` 了解新页面
+  - `"dom_update"` → DOM 变化但 URL 没变（弹窗/表单出现），继续在当前页探索
+  - `"no_change"` → 无变化，selector 可能错了，换元素重试
+- `interactive-elements` 返回的元素列表（含坐标、selector、文本）是 Agent **选择下一个操作目标**的核心输入
+- `screenshot` 提供视觉上下文，Agent 可以确认页面是否加载正确、弹窗是否出现
+- `network-log` 让 Agent **逆向理解**点击/输入触发了什么后端 API，从而推断数据流
+
+### ❌ 不要这样做
+
+```python
+# BAD: 预编排脚本，Agent 不参与决策
+MODULES = [("article", url1), ("ai_task", url2), ...]
+for key, url in MODULES:
+    requests.post(f"{API}/navigate", params={"url": url})
+    requests.post(f"{API}/click", params={"selector": "a.btn-add"})  # 假设一定存在
+    requests.get(f"{API}/screenshot")
+```
+
+这种写法的问题：
+- `a.btn-add` 不一定存在（如 webmedia 模块用不同的 class）
+- Agent 看不到中间状态，无法调整策略
+- 点击失败后无法换 selector 重试
+- 无法根据页面实际内容决定探索深度
+
+### ✅ 正确做法：Agent 在循环中决策
+
+```python
+# GOOD: Agent 每一步都基于观察结果决策
+# 1. 创建会话
+r = requests.post(f"{API}/sessions", params={"cookies_file": "cookies.json"})
+sid = r.json()["session_id"]
+
+# 2. 导航到目标
+requests.post(f"{API}/sessions/{sid}/navigate", params={"url": target_url})
+
+# 3. Agent 观察当前页面有哪些可交互元素
+elements = requests.get(f"{API}/sessions/{sid}/interactive-elements").json()
+#    Agent 分析：找到 "Add" 按钮的 selector
+add_btn = next((e for e in elements["elements"] if "添加" in e["text"]), None)
+
+# 4. Agent 决定点击这个按钮
+if add_btn:
+    result = requests.post(
+        f"{API}/sessions/{sid}/click",
+        params={"selector": add_btn["selector"]}
+    ).json()
+    #    Agent 读取 interaction_type 判断结果
+    if result["interaction_type"] == "no_change":
+        # Agent 决策：换 selector 重试，或用 iframe 方式
+        ...
+    elif result["interaction_type"] == "dom_update":
+        # Agent 决策：表单出现了，继续探索表单字段
+        dom = requests.get(f"{API}/sessions/{sid}/dom").json()
+        #    解析 HTML，决定填写哪些字段...
+```
+
+### 持久化策略
+
+- `save()` 在关键节点调用（如完成一个模块的探索、捕获到重要表单）
+- `save()` 将内存中的网络日志追加到磁盘，然后清空内存缓冲区
+- Agent 可以暂停很长时间，浏览器保持打开；回来后从上次状态继续
+- 磁盘目录 `weblica-sessions/sessions/{id}/` 包含：cookies、storage、state.json、screenshot.png、network_log.jsonl
 
 ---
 
