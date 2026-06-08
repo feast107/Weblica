@@ -182,6 +182,22 @@ python -m weblica.api_server
 # → http://localhost:8765
 ```
 
+**Network log 过滤（重要）**
+
+默认只保存 `xhr`/`fetch`/`document` 的响应 body。静态资源（`script`、`stylesheet`、`image`、`font`）只记录元数据（URL、status、headers），不保存 body。这避免了 network log 被 JS/CSS 源码撑爆（ geo18 实测：从 449 KB → 6 KB，减少 **99%**）。
+
+如需自定义：
+```bash
+# 只记录 API 调用（最精简）
+curl -X POST "http://localhost:8765/sessions?capture_body_types=xhr,fetch"
+
+# 记录 API + 页面 HTML（默认）
+curl -X POST "http://localhost:8765/sessions?capture_body_types=xhr,fetch,document"
+
+# 记录所有类型（不推荐 — 静态资源 body 会产生巨大日志）
+curl -X POST "http://localhost:8765/sessions?capture_body_types=all"
+```
+
 ### Agent 主动探索工作流
 
 Agent 通过**反复调用 API 观察浏览器状态并做出决策**，而非预写脚本。典型循环：

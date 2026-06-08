@@ -56,11 +56,13 @@ class ExplorationSession:
         output_dir: Path,
         headless: bool = True,
         auth_manager: Optional[AuthManager] = None,
+        capture_body_for: Optional[set] = None,
     ):
         self.session_id = session_id
         self.output_dir = output_dir
         self.headless = headless
         self.auth_manager = auth_manager
+        self.capture_body_for = capture_body_for
 
         self.browser: Optional[CloakBrowser] = None
         self.page: Optional[Any] = None
@@ -86,7 +88,10 @@ class ExplorationSession:
 
         self.page = await self.browser.new_page()
 
-        self.interceptor = NetworkInterceptor(self.page)
+        self.interceptor = NetworkInterceptor(
+            self.page,
+            capture_body_for=self.capture_body_for,
+        )
         self.interceptor.start()
 
         self._initialized = True
@@ -347,6 +352,7 @@ class SessionManager:
         self,
         headless: bool = True,
         auth_manager: Optional[AuthManager] = None,
+        capture_body_for: Optional[set] = None,
     ) -> str:
         """Create and initialize a new browser session. Returns session_id."""
         session_id = str(uuid.uuid4())[:8]
@@ -355,6 +361,7 @@ class SessionManager:
             output_dir=self.output_dir,
             headless=headless,
             auth_manager=auth_manager,
+            capture_body_for=capture_body_for,
         )
         await session.initialize()
         self.sessions[session_id] = session

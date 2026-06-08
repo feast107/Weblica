@@ -196,10 +196,16 @@ class NetworkInterceptor:
         traffic = interceptor.stop_and_collect()
     """
     
-    def __init__(self, page: Page, max_body_preview: int = 2000, max_body_size: int = 500_000):
+    # Resource types that are worth capturing full body for (API calls & page HTML)
+    DEFAULT_BODY_TYPES = {"xhr", "fetch", "document"}
+    
+    def __init__(self, page: Page, max_body_preview: int = 2000, max_body_size: int = 500_000,
+                 capture_body_for: Optional[set] = None):
         self.page = page
         self.max_body_preview = max_body_preview
         self.max_body_size = max_body_size  # Max bytes for full body capture
+        # Which resource types deserve full body capture (default: API calls + page HTML)
+        self.capture_body_for = capture_body_for or self.DEFAULT_BODY_TYPES
         
         # In-flight requests awaiting responses
         self._pending: Dict[str, CapturedRequest] = {}
@@ -307,31 +313,39 @@ class NetworkInterceptor:
             
             content_type = resp_headers.get("content-type", "")
             
-            # Try to capture full body for text-based responses
+            # Try to capture full body for API-relevant resource types only.
+            # Static assets (script, stylesheet, image, font) bloat the log
+            # without providing value to the agent.
             body = None
             body_preview = None
             body_truncated = False
             
-            is_text_type = content_type and any(
-                ct in content_type.lower() 
-                for ct in ["json", "javascript", "text", "xml", "html", "csv"]
-            )
+            rtype = captured_req.resource_type or "unknown"
+            should_capture_body = rtype in self.capture_body_for
             
-            if is_text_type:
-                try:
-                    raw_body = await response.body()
-                    if len(raw_body) <= self.max_body_size:
-                        body = raw_body.decode("utf-8", errors="replace")
-                    else:
-                        body = raw_body[:self.max_body_size].decode("utf-8", errors="replace")
-                        body_truncated = True
-                    
-                    # Build preview
-                    body_preview = body[:self.max_body_preview] if body else None
-                    if body and len(body) > self.max_body_preview:
-                        body_preview += f"\n... ({len(body)} chars total)"
-                except Exception:
-                    pass
+            if should_capture_body:
+                is_text_type = content_type and any(
+                    ct in content_type.lower()
+                    for ct in ["json", "javascript", "text", "xml", "html", "csv"]
+                )
+                if is_text_type:
+                    try:
+                        raw_body = await response.body()
+                        if len(raw_body) <= self.max_body_size:
+                            body = raw_body.decode("utf-8", errors="replace")
+                        else:
+                            body = raw_body[:self.max_body_size].decode("utf-8", errors="replace")
+                            body_truncated = True
+                        
+                        # Build preview
+                        body_preview = body[:self.max_body_preview] if body else None
+                        if body and len(body) > self.max_body_preview:
+                            body_preview += f"\n... ({len(body)} chars total)"
+                    except Exception:
+                        pass
+            else:
+                # For non-API resources, just note that body was skipped
+                body_preview = f"[{rtype} body skipped — not an API/resource type]"
             
             captured_resp = CapturedResponse(
                 status=response.status,

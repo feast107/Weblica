@@ -32,12 +32,33 @@ manager = SessionManager()
 
 
 @app.post("/sessions")
-async def create_session(headless: bool = True, cookies_file: Optional[str] = None):
-    """Create a new browser session. Returns session_id."""
+async def create_session(
+    headless: bool = True,
+    cookies_file: Optional[str] = None,
+    capture_body_types: Optional[str] = None,
+):
+    """Create a new browser session. Returns session_id.
+    
+    capture_body_types: comma-separated list of resource types to capture full body for.
+                        Default: "xhr,fetch,document" (API calls + page HTML).
+                        Set to "all" to capture everything (not recommended — produces huge logs).
+    """
     auth = None
     if cookies_file:
         auth = AuthManager(AuthConfig(cookies_file=cookies_file))
-    session_id = await manager.create_session(headless=headless, auth_manager=auth)
+    
+    capture_body_for = None
+    if capture_body_types:
+        if capture_body_types.strip().lower() == "all":
+            capture_body_for = None  # None = default behavior in NetworkInterceptor, but we'll override
+        else:
+            capture_body_for = set(t.strip() for t in capture_body_types.split(","))
+    
+    session_id = await manager.create_session(
+        headless=headless,
+        auth_manager=auth,
+        capture_body_for=capture_body_for,
+    )
     return {"session_id": session_id, "status": "created"}
 
 
